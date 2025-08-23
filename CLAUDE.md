@@ -45,11 +45,30 @@ This is a TAXI Chatbot system for infrastructure provisioning with the following
 
 ## Important Implementation Details
 
-- Uses Marvin.ai for NLP processing (requires OPENAI_API_KEY)
+- **Pattern Matching Implementation**: Uses direct pattern matching for intent detection and requirement extraction
+  - No longer depends on Marvin.ai for core functionality
+  - OpenAI API key optional (warning shown if not configured)
 - CORS enabled for cross-origin requests
 - Docker Compose orchestrates three services: mcp-server, api, and frontend
 - VM provisioning currently mocked (returns simulated TAXI responses)
 - Required VM fields defined in `VMRequest.get_missing_fields()`
+
+### Agent Implementations
+
+#### Orchestrator Agent (`agents/orchestrator.py`)
+- Analyzes user input to determine intent (create_compute, create_database, modify_resource, delete_resource)
+- Detects cloud provider (GCP, Azure, AWS)
+- Routes requests to appropriate specialist agents
+
+#### Compute Agent (`agents/compute.py`)
+- Extracts VM requirements from natural language using keyword detection
+- Identifies: environment, OS, use type, machine type, zone, line of business
+- Maps extracted data to VMRequest model fields
+
+#### Clarification Agent (`agents/clarification.py`)
+- Generates natural questions for missing required fields
+- Uses predefined question templates for consistent UX
+- Handles user responses to populate VM request
 
 ## Testing Endpoints
 
@@ -57,3 +76,29 @@ This is a TAXI Chatbot system for infrastructure provisioning with the following
 - Chat: `POST http://localhost:8000/chat` with `{"message": "...", "session_id": null}`
 - Answer clarifications: `POST http://localhost:8000/answer` with `{"session_id": "...", "answers": {...}}`
 - Session status: `GET http://localhost:8000/session/{session_id}/status`
+
+## Troubleshooting
+
+### API Key Issues
+- The system works without an OpenAI API key using pattern matching
+- If you see "WARNING: OPENAI_API_KEY not configured", the system will still function
+- To enable AI features (optional), add a valid OpenAI API key to `.env`
+
+### Running the Backend
+```bash
+# From the backend directory
+PYTHONPATH=/path/to/backend python -m uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+### Test Examples
+```bash
+# Test basic VM request
+curl -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "I want a VM in GCP", "session_id": null}'
+
+# Test with more details
+curl -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Deploy a Windows 2022 VM in us-east4-a for retail app in production", "session_id": null}'
+```

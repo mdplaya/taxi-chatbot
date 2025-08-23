@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, EmailStr, validator
+from pydantic import BaseModel, Field, validator
 from typing import Optional, List, Literal, Dict, Any
 from enum import Enum
 from datetime import datetime
@@ -45,7 +45,7 @@ class VMRequest(BaseModel):
     os: Optional[OS] = None
     useType: Optional[UseType] = None
     machineType: Optional[MachineType] = None
-    id: Optional[EmailStr] = None
+    id: Optional[str] = None  # Email address
     
     @validator('costCenter')
     def validate_cost_center(cls, v):

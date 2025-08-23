@@ -1,12 +1,9 @@
-import marvin
-from marvin import fn
 from typing import List, Dict, Any, Optional
 from models.taxi_models import VMRequest
 import logging
 
 logger = logging.getLogger(__name__)
 
-@fn
 def generate_natural_question(field_name: str, context: str) -> str:
     """
     Generate a natural, conversational question for a missing field.
@@ -16,7 +13,21 @@ def generate_natural_question(field_name: str, context: str) -> str:
     - field_name: "os", context: "Linux server" -> "What operating system do you need? (RHEL8, RHEL9, Windows 2019, or Windows 2022)"
     - field_name: "costCenter", context: "retail app" -> "What's the 5-digit cost center code for this resource?"
     """
-    pass
+    # Direct implementation with question templates
+    questions = {
+        "zone": "Which GCP zone would you like to deploy to (e.g., us-east4-a)?",
+        "os": "What operating system do you need? (LINUX_RHEL8, LINUX_RHEL9, WINDOWS_19, or WINDOWS_22)",
+        "costCenter": "What's the 5-digit cost center code for this resource?",
+        "appEnvironment": "Is this for a production or non-production environment? (PROD or NONPROD)",
+        "appEnvironmentSubtype": "What environment subtype? (dev, qa, test, or perf)",
+        "lineOfBusiness": "Which line of business is this for? (RETAIL, ISTS, or EDML)",
+        "project": "What's the GCP project name?",
+        "useType": "What will this VM be used for? (app or database)",
+        "machineType": "What machine type do you need? (e.g., n1-STANDARD-1, n2-STANDARD-1)",
+        "id": "What's your email address?"
+    }
+    
+    return questions.get(field_name, f"Please provide the {field_name}:")
 
 class ClarificationAgent:
     """Handles gathering missing information from users"""
@@ -56,7 +67,7 @@ class ClarificationAgent:
         questions = []
         for field in missing_fields:
             try:
-                # Use Marvin to generate natural question
+                # Generate natural question
                 question = generate_natural_question(field, context)
                 questions.append({
                     "field": field,

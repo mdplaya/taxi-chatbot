@@ -22,6 +22,14 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Validate required environment variables
+import sys
+api_key = os.getenv('OPENAI_API_KEY', '')
+if not api_key or api_key.startswith('sk-your'):
+    logger.warning("WARNING: OPENAI_API_KEY not configured properly. The chatbot will use pattern matching instead of AI.")
+    logger.warning("To enable AI features, please set a valid OpenAI API key in your .env file")
+    # Continue running with pattern matching implementation
+
 # Initialize FastAPI app
 app = FastAPI(title="TAXI Chatbot API")
 

@@ -1,5 +1,3 @@
-import marvin
-from marvin import fn
 from pydantic import BaseModel
 from typing import Literal, Optional, Dict, Any
 import logging
@@ -13,7 +11,6 @@ class UserIntent(BaseModel):
     resource_type: Optional[str] = None
     raw_requirements: str
 
-@fn
 def analyze_user_request(user_input: str) -> UserIntent:
     """
     Analyze user request and determine intent and cloud provider.
@@ -24,7 +21,38 @@ def analyze_user_request(user_input: str) -> UserIntent:
     - "Deploy a database" -> intent: create_database, provider: None
     - "Set up a virtual machine in Google Cloud" -> intent: create_compute, provider: gcp
     """
-    pass
+    user_input_lower = user_input.lower()
+    
+    # Detect cloud provider
+    provider = None
+    if any(term in user_input_lower for term in ['gcp', 'google cloud', 'gce', 'google compute']):
+        provider = 'gcp'
+    elif any(term in user_input_lower for term in ['azure', 'microsoft']):
+        provider = 'azure'
+    elif any(term in user_input_lower for term in ['aws', 'amazon', 'ec2']):
+        provider = 'aws'
+    
+    # Detect intent - check specific actions first before resource creation
+    intent = 'unclear'
+    resource_type = None
+    
+    if any(term in user_input_lower for term in ['delete', 'remove', 'terminate', 'destroy']):
+        intent = 'delete_resource'
+    elif any(term in user_input_lower for term in ['modify', 'update', 'change', 'resize', 'scale']):
+        intent = 'modify_resource'
+    elif any(term in user_input_lower for term in ['vm', 'virtual machine', 'instance', 'server', 'compute']):
+        intent = 'create_compute'
+        resource_type = 'vm'
+    elif any(term in user_input_lower for term in ['database', 'db', 'sql', 'postgres', 'mysql', 'mongodb']):
+        intent = 'create_database'
+        resource_type = 'database'
+    
+    return UserIntent(
+        intent=intent,
+        provider=provider,
+        resource_type=resource_type,
+        raw_requirements=user_input
+    )
 
 class OrchestratorAgent:
     """Routes requests to appropriate specialist agents"""
