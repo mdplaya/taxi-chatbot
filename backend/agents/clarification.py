@@ -102,6 +102,29 @@ class ClarificationAgent:
         for field, value in answers.items():
             if hasattr(vm_request, field) and value:
                 try:
+                    # Normalize case based on field type
+                    # AppEnvironment: Convert to uppercase
+                    if field == "appEnvironment":
+                        value = value.upper()  # prod -> PROD
+                    # LineOfBusiness: Convert to uppercase
+                    elif field == "lineOfBusiness":
+                        value = value.upper()  # retail -> RETAIL
+                    # OS: Convert to uppercase with underscores
+                    elif field == "os":
+                        value = value.upper().replace("-", "_")  # linux-rhel8 -> LINUX_RHEL8
+                    # MachineType: Special handling for pattern
+                    elif field == "machineType":
+                        # n1-standard-1 -> n1-STANDARD-1
+                        parts = value.split("-")
+                        if len(parts) >= 2:
+                            parts[0] = parts[0].lower()  # First part lowercase (n1, n2, e2, etc.)
+                            parts[1] = parts[1].upper()  # Second part uppercase (STANDARD)
+                            # Keep remaining parts as-is (the number)
+                        value = "-".join(parts)
+                    # AppEnvironmentSubtype & UseType: Keep lowercase
+                    elif field in ["appEnvironmentSubtype", "useType"]:
+                        value = value.lower()  # QA -> qa, APP -> app
+                    
                     # Handle enum conversions based on field name
                     if field == "appEnvironment":
                         setattr(vm_request, field, AppEnvironment(value))
