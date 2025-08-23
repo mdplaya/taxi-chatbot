@@ -29,10 +29,30 @@ class UseType(str, Enum):
     DATABASE = "database"
 
 class MachineType(str, Enum):
-    N1_STANDARD_1 = "n1-STANDARD-1"
-    N2_STANDARD_1 = "n2-STANDARD-1"
-    N3_STANDARD_1 = "n3-STANDARD-1"
-    N4_STANDARD_1 = "n4-STANDARD-1"
+    # E2 Series (Cost Optimized)
+    E2_MICRO = "e2-micro"
+    E2_SMALL = "e2-small"
+    E2_MEDIUM = "e2-medium"
+    E2_STANDARD_2 = "e2-standard-2"
+    E2_STANDARD_4 = "e2-standard-4"
+    E2_STANDARD_8 = "e2-standard-8"
+    
+    # N1 Series (Previous Gen)
+    N1_STANDARD_1 = "n1-standard-1"
+    N1_STANDARD_2 = "n1-standard-2"
+    N1_STANDARD_4 = "n1-standard-4"
+    N1_STANDARD_8 = "n1-standard-8"
+    
+    # N2 Series (Balanced)
+    N2_STANDARD_2 = "n2-standard-2"
+    N2_STANDARD_4 = "n2-standard-4"
+    N2_STANDARD_8 = "n2-standard-8"
+    N2_HIGHMEM_2 = "n2-highmem-2"
+    N2_HIGHMEM_4 = "n2-highmem-4"
+    
+    # C2 Series (Compute Optimized)
+    C2_STANDARD_4 = "c2-standard-4"
+    C2_STANDARD_8 = "c2-standard-8"
 
 class VMRequest(BaseModel):
     """User's VM request with optional fields"""

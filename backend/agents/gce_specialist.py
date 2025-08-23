@@ -1,5 +1,5 @@
 from typing import Dict, Any
-from models.taxi_models import VMRequest
+from models.taxi_models import VMRequest, MachineType
 import logging
 import json
 
@@ -93,6 +93,16 @@ class GCESpecialistAgent:
                 "issue": "PROD environment should not have a subtype",
                 "suggestion": "Remove appEnvironmentSubtype for PROD"
             })
+        
+        # Validate machine type is from the supported list
+        if vm_request.machineType:
+            valid_machine_types = [mt.value for mt in MachineType]
+            if vm_request.machineType not in valid_machine_types:
+                validations.append({
+                    "field": "machineType",
+                    "issue": f"Invalid machine type: {vm_request.machineType}",
+                    "suggestion": f"Use one of: {', '.join(valid_machine_types[:5])}..."
+                })
         
         return {
             "valid": len(validations) == 0,

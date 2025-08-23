@@ -1,10 +1,21 @@
 from typing import List, Dict, Any, Optional
 from models.taxi_models import VMRequest
 import logging
+import sys
+import os
+import asyncio
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from utils.llm_manager import llm_manager
+
+try:
+    import marvin
+    MARVIN_AVAILABLE = True
+except ImportError:
+    MARVIN_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
-def generate_natural_question(field_name: str, context: str) -> str:
+def generate_template_question(field_name: str, context: str = "") -> str:
     """
     Generate a natural, conversational question for a missing field.
     
@@ -23,18 +34,46 @@ def generate_natural_question(field_name: str, context: str) -> str:
         "lineOfBusiness": "Which line of business is this for? (RETAIL, ISTS, or EDML)",
         "project": "What's the GCP project name?",
         "useType": "What will this VM be used for? (app or database)",
-        "machineType": "What machine type do you need? (e.g., n1-STANDARD-1, n2-STANDARD-1)",
+        "machineType": "What machine type do you need? (e.g., e2-small, n1-standard-1, n2-standard-2, c2-standard-4)",
         "id": "What's your email address?"
     }
     
     return questions.get(field_name, f"Please provide the {field_name}:")
 
+# LLM-powered natural question generation
+if MARVIN_AVAILABLE:
+    @marvin.fn
+    def generate_natural_questions_llm(missing_fields: List[str], context: str, conversation_history: list = None) -> List[Dict[str, str]]:
+        """
+        Generate natural, conversational questions for missing fields using AI.
+        Consider the conversation context to create more relevant questions.
+        
+        Each question should:
+        1. Be conversational and friendly
+        2. Include helpful examples or hints
+        3. Consider what the user has already told us
+        4. Be clear about the expected format
+        
+        Return a list of dictionaries with 'field' and 'question' keys.
+        
+        Examples:
+        missing_fields=["zone", "os"], context="I need a VM for testing our retail app"
+        -> [
+            {"field": "zone", "question": "Where would you like to deploy this test VM? We have zones like us-east4-a or us-central1-b available."},
+            {"field": "os", "question": "What operating system should we use for your retail app testing? We support RHEL 8/9 and Windows Server 2019/2022."}
+        ]
+        """
+        pass  # Marvin will handle the implementation
+else:
+    generate_natural_questions_llm = None
+
 class ClarificationAgent:
-    """Handles gathering missing information from users"""
+    """Handles gathering missing information from users with LLM support"""
     
     def __init__(self, mcp_client=None):
         self.mcp = mcp_client
         self.logger = logging.getLogger(self.__class__.__name__)
+        self.asked_fields = set()  # Track which fields we've asked about
         
         # Field descriptions for better questions
         self.field_descriptions = {
@@ -46,48 +85,81 @@ class ClarificationAgent:
             "zone": "GCP zone (e.g., us-east4-a)",
             "os": "operating system (LINUX_RHEL8, LINUX_RHEL9, WINDOWS_19, or WINDOWS_22)",
             "useType": "usage type (app or database)",
-            "machineType": "machine type (n1-STANDARD-1, n2-STANDARD-1, etc.)",
+            "machineType": "machine type (e2-small, n1-standard-1, n2-standard-2, c2-standard-4, etc.)",
             "id": "your email address"
         }
     
-    async def get_clarifications(self, vm_request: VMRequest, context: str = "") -> Dict[str, Any]:
-        """Generate clarification questions for missing fields"""
+    async def get_clarifications(self, vm_request: VMRequest, context: str = "", conversation_history: list = None) -> Dict[str, Any]:
+        """Generate clarification questions for missing fields with LLM support"""
         
         missing_fields = vm_request.get_missing_fields()
         
-        if not missing_fields:
+        # Filter out fields we've already asked about
+        new_missing_fields = [f for f in missing_fields if f not in self.asked_fields]
+        
+        if not new_missing_fields:
+            if missing_fields:  # Still have missing fields but already asked
+                return {
+                    "complete": False,
+                    "error": "Some required fields are still missing. Please provide all required information.",
+                    "missing_fields": missing_fields
+                }
             return {
                 "complete": True,
-                "vm_request": vm_request.dict()
+                "vm_request": vm_request.dict(),
+                "mode": llm_manager.get_mode()
             }
         
-        self.logger.info(f"Missing fields: {missing_fields}")
+        self.logger.info(f"Missing fields: {new_missing_fields}")
         
-        # Generate questions for each missing field
+        # Mark fields as asked
+        self.asked_fields.update(new_missing_fields)
+        
+        # Determine which question generation method to use
+        mode = llm_manager.get_mode()
         questions = []
-        for field in missing_fields:
+        
+        if mode == "online" and generate_natural_questions_llm:
             try:
-                # Generate natural question
-                question = generate_natural_question(field, context)
-                questions.append({
-                    "field": field,
-                    "question": question,
-                    "description": self.field_descriptions.get(field, field)
-                })
+                # Try LLM-powered natural question generation
+                result = await llm_manager.call_with_timeout(
+                    generate_natural_questions_llm,
+                    new_missing_fields,
+                    context,
+                    conversation_history
+                )
+                if result:
+                    questions = result
+                    self.logger.info(f"LLM generated {len(questions)} natural questions")
             except Exception as e:
-                # Fallback to template question
-                self.logger.warning(f"Error generating question for {field}: {e}")
-                questions.append({
-                    "field": field,
-                    "question": f"Please provide the {self.field_descriptions.get(field, field)}:",
-                    "description": self.field_descriptions.get(field, field)
-                })
+                self.logger.warning(f"LLM question generation failed: {e}")
+        
+        # Fallback to template questions if needed
+        if not questions:
+            for field in new_missing_fields:
+                try:
+                    # Generate template question
+                    question = generate_template_question(field, context)
+                    questions.append({
+                        "field": field,
+                        "question": question,
+                        "description": self.field_descriptions.get(field, field)
+                    })
+                except Exception as e:
+                    # Ultimate fallback
+                    self.logger.warning(f"Error generating question for {field}: {e}")
+                    questions.append({
+                        "field": field,
+                        "question": f"Please provide the {self.field_descriptions.get(field, field)}:",
+                        "description": self.field_descriptions.get(field, field)
+                    })
         
         return {
             "complete": False,
             "questions": questions,
             "current_state": vm_request.dict(),
-            "missing_count": len(missing_fields)
+            "missing_count": len(new_missing_fields),
+            "mode": mode
         }
     
     async def process_answers(self, vm_request: VMRequest, answers: Dict[str, str]) -> VMRequest:
@@ -112,15 +184,9 @@ class ClarificationAgent:
                     # OS: Convert to uppercase with underscores
                     elif field == "os":
                         value = value.upper().replace("-", "_")  # linux-rhel8 -> LINUX_RHEL8
-                    # MachineType: Special handling for pattern
+                    # MachineType: Keep lowercase with hyphens (new format)
                     elif field == "machineType":
-                        # n1-standard-1 -> n1-STANDARD-1
-                        parts = value.split("-")
-                        if len(parts) >= 2:
-                            parts[0] = parts[0].lower()  # First part lowercase (n1, n2, e2, etc.)
-                            parts[1] = parts[1].upper()  # Second part uppercase (STANDARD)
-                            # Keep remaining parts as-is (the number)
-                        value = "-".join(parts)
+                        value = value.lower()  # e2-small, n1-standard-1, etc.
                     # AppEnvironmentSubtype & UseType: Keep lowercase
                     elif field in ["appEnvironmentSubtype", "useType"]:
                         value = value.lower()  # QA -> qa, APP -> app

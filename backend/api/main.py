@@ -1,12 +1,16 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Literal
 import logging
 import uuid
 from datetime import datetime
 import os
 from dotenv import load_dotenv
+import sys
+
+# Add backend to path for imports
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Import agents
 from agents.orchestrator import OrchestratorAgent
@@ -14,6 +18,7 @@ from agents.clarification import ClarificationAgent
 from agents.compute import ComputeAgent
 from agents.gce_specialist import GCESpecialistAgent
 from models.taxi_models import VMRequest, ChatSession
+from utils.llm_manager import llm_manager
 
 # Load environment variables
 load_dotenv()
@@ -22,13 +27,13 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Validate required environment variables
-import sys
-api_key = os.getenv('OPENAI_API_KEY', '')
-if not api_key or api_key.startswith('sk-your'):
-    logger.warning("WARNING: OPENAI_API_KEY not configured properly. The chatbot will use pattern matching instead of AI.")
+# Check LLM availability on startup
+current_mode = llm_manager.get_mode()
+if current_mode == "offline":
+    logger.warning("WARNING: Running in OFFLINE mode - using pattern matching instead of AI.")
     logger.warning("To enable AI features, please set a valid OpenAI API key in your .env file")
-    # Continue running with pattern matching implementation
+else:
+    logger.info(f"Running in ONLINE mode - AI features enabled")
 
 # Initialize FastAPI app
 app = FastAPI(title="TAXI Chatbot API")
@@ -59,6 +64,7 @@ class ChatResponse(BaseModel):
     session_id: str
     final_payload: Optional[Dict[str, Any]] = None
     status: str
+    mode: Literal["online", "offline"] = "offline"  # Current operation mode
 
 class AnswerRequest(BaseModel):
     """Clarification answers from client"""
@@ -82,7 +88,23 @@ async def root():
 @app.get("/health")
 async def health():
     """Health check endpoint"""
-    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+    current_mode = llm_manager.get_mode()
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "mode": current_mode,
+        "llm_available": current_mode == "online"
+    }
+
+@app.get("/status")
+async def status():
+    """Get current system status and mode"""
+    current_mode = llm_manager.get_mode()
+    return {
+        "mode": current_mode,
+        "description": "AI-powered responses" if current_mode == "online" else "Pattern-based responses",
+        "active_sessions": len(sessions)
+    }
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
@@ -108,6 +130,9 @@ async def chat(request: ChatRequest):
     orchestrator = OrchestratorAgent()
     
     try:
+        # Get current mode
+        current_mode = llm_manager.get_mode()
+        
         # Process through orchestrator
         orchestrator_result = await orchestrator.process(request.message, session_id)
         
@@ -141,7 +166,8 @@ async def chat(request: ChatRequest):
                         needs_clarification=True,
                         questions=clarification_result["questions"],
                         session_id=session_id,
-                        status=session.status
+                        status=session.status,
+                        mode=current_mode
                     )
             
             # Ready to provision
@@ -165,7 +191,8 @@ async def chat(request: ChatRequest):
                         needs_clarification=False,
                         session_id=session_id,
                         final_payload=provision_result.get("payload_sent"),
-                        status=session.status
+                        status=session.status,
+                        mode=current_mode
                     )
                 else:
                     # Handle provisioning error
@@ -181,14 +208,16 @@ async def chat(request: ChatRequest):
                             needs_clarification=True,
                             questions=clarification_result["questions"],
                             session_id=session_id,
-                            status=session.status
+                            status=session.status,
+                            mode=current_mode
                         )
                     
                     return ChatResponse(
                         response=f"❌ Error provisioning VM: {provision_result.get('error', 'Unknown error')}",
                         needs_clarification=False,
                         session_id=session_id,
-                        status="failed"
+                        status="failed",
+                        mode=current_mode
                     )
         
         elif orchestrator_result["next_agent"] == "clarification":
@@ -197,7 +226,8 @@ async def chat(request: ChatRequest):
                 response="I'm not sure what you'd like to do. Could you please provide more details about the resource you want to create?",
                 needs_clarification=False,
                 session_id=session_id,
-                status="gathering_info"
+                status="gathering_info",
+                mode=current_mode
             )
         
         else:
@@ -206,7 +236,8 @@ async def chat(request: ChatRequest):
                 response=f"The {orchestrator_result['next_agent']} agent is not yet implemented. Currently, I can only help with creating VMs in GCP.",
                 needs_clarification=False,
                 session_id=session_id,
-                status="gathering_info"
+                status="gathering_info",
+                mode=current_mode
             )
     
     except Exception as e:
@@ -215,7 +246,8 @@ async def chat(request: ChatRequest):
             response=f"An error occurred: {str(e)}",
             needs_clarification=False,
             session_id=session_id,
-            status="error"
+            status="error",
+            mode=llm_manager.get_mode()
         )
 
 @app.post("/answer", response_model=ChatResponse)
@@ -236,6 +268,9 @@ async def answer_clarification(request: AnswerRequest):
         session.vm_request,
         request.answers
     )
+    
+    # Get current mode
+    current_mode = llm_manager.get_mode()
     
     # Check if we have all required fields now
     clarification_result = await clarification_agent.get_clarifications(
@@ -261,14 +296,16 @@ async def answer_clarification(request: AnswerRequest):
                 needs_clarification=False,
                 session_id=request.session_id,
                 final_payload=provision_result.get("payload_sent"),
-                status=session.status
+                status=session.status,
+                mode=current_mode
             )
         else:
             return ChatResponse(
                 response=f"Error: {provision_result.get('error', 'Unknown error')}",
                 needs_clarification=False,
                 session_id=request.session_id,
-                status="failed"
+                status="failed",
+                mode=current_mode
             )
     else:
         # Still need more information
@@ -277,7 +314,8 @@ async def answer_clarification(request: AnswerRequest):
             needs_clarification=True,
             questions=clarification_result["questions"],
             session_id=request.session_id,
-            status="gathering_info"
+            status="gathering_info",
+            mode=current_mode
         )
 
 @app.get("/session/{session_id}/status")

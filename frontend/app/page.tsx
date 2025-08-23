@@ -10,12 +10,39 @@ interface Message {
   payload?: any
 }
 
+// Status Badge Component
+function StatusBadge({ mode }: { mode: 'online' | 'offline' | null }) {
+  if (!mode) return null
+  
+  return (
+    <div 
+      className={`fixed top-4 right-4 px-3 py-1 rounded-full text-sm font-medium shadow-lg z-50 ${
+        mode === 'online' 
+          ? 'bg-green-100 text-green-800 border border-green-200'
+          : 'bg-yellow-100 text-yellow-800 border border-yellow-200'
+      }`}
+      title={mode === 'online' 
+        ? 'AI-powered responses enabled' 
+        : 'Using pattern-based responses (AI unavailable)'
+      }
+    >
+      <div className="flex items-center space-x-2">
+        <div className={`w-2 h-2 rounded-full ${
+          mode === 'online' ? 'bg-green-500' : 'bg-yellow-500'
+        } animate-pulse`}></div>
+        <span>{mode === 'online' ? 'ONLINE' : 'OFFLINE'}</span>
+      </div>
+    </div>
+  )
+}
+
 export default function Chat() {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [answers, setAnswers] = useState<Record<string, string>>({})
+  const [systemMode, setSystemMode] = useState<'online' | 'offline' | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   
   const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
@@ -23,6 +50,24 @@ export default function Chat() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
+  
+  // Check system status on mount
+  useEffect(() => {
+    const checkStatus = async () => {
+      try {
+        const response = await fetch(`${API_URL}/status`)
+        const data = await response.json()
+        setSystemMode(data.mode)
+      } catch (error) {
+        console.error('Error checking status:', error)
+      }
+    }
+    checkStatus()
+    
+    // Recheck every 30 seconds
+    const interval = setInterval(checkStatus, 30000)
+    return () => clearInterval(interval)
+  }, [API_URL])
   
   const sendMessage = async () => {
     if (!input.trim()) return
@@ -49,6 +94,11 @@ export default function Chat() {
       
       const data = await response.json()
       setSessionId(data.session_id)
+      
+      // Update mode from response
+      if (data.mode) {
+        setSystemMode(data.mode)
+      }
       
       const botMessage: Message = {
         id: (Date.now() + 1).toString(),
@@ -86,6 +136,11 @@ export default function Chat() {
       
       const data = await response.json()
       
+      // Update mode from response
+      if (data.mode) {
+        setSystemMode(data.mode)
+      }
+      
       const botMessage: Message = {
         id: Date.now().toString(),
         type: data.needs_clarification ? 'questions' : 'bot',
@@ -105,6 +160,7 @@ export default function Chat() {
   
   return (
     <div className="min-h-screen bg-gray-50">
+      <StatusBadge mode={systemMode} />
       <div className="max-w-4xl mx-auto p-4">
         <div className="bg-white rounded-lg shadow-lg">
           <div className="bg-blue-600 text-white p-4 rounded-t-lg">
@@ -117,6 +173,11 @@ export default function Chat() {
               <div className="text-center text-gray-500 mt-8">
                 <p className="text-lg mb-2">Welcome! I can help you provision infrastructure.</p>
                 <p className="text-sm">Try: "I want a VM in GCP" or "Create a Linux server for development"</p>
+                {systemMode === 'offline' && (
+                  <p className="text-xs mt-2 text-yellow-600">
+                    Note: Running in offline mode. AI features are disabled.
+                  </p>
+                )}
               </div>
             )}
             
