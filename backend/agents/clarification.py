@@ -93,9 +93,35 @@ class ClarificationAgent:
     async def process_answers(self, vm_request: VMRequest, answers: Dict[str, str]) -> VMRequest:
         """Update VM request with provided answers"""
         
+        # Import enum classes for type conversion
+        from models.taxi_models import (
+            AppEnvironment, AppEnvironmentSubtype, LineOfBusiness, 
+            OS, UseType, MachineType
+        )
+        
         for field, value in answers.items():
-            if hasattr(vm_request, field):
-                setattr(vm_request, field, value)
-                self.logger.info(f"Updated {field} = {value}")
+            if hasattr(vm_request, field) and value:
+                try:
+                    # Handle enum conversions based on field name
+                    if field == "appEnvironment":
+                        setattr(vm_request, field, AppEnvironment(value))
+                    elif field == "appEnvironmentSubtype":
+                        setattr(vm_request, field, AppEnvironmentSubtype(value))
+                    elif field == "lineOfBusiness":
+                        setattr(vm_request, field, LineOfBusiness(value))
+                    elif field == "os":
+                        setattr(vm_request, field, OS(value))
+                    elif field == "useType":
+                        setattr(vm_request, field, UseType(value))
+                    elif field == "machineType":
+                        setattr(vm_request, field, MachineType(value))
+                    else:
+                        # String fields (costCenter, project, zone, id)
+                        setattr(vm_request, field, value)
+                    
+                    self.logger.info(f"Updated {field} = {value}")
+                except ValueError as e:
+                    self.logger.error(f"Invalid value for {field}: {value} - {e}")
+                    raise ValueError(f"Invalid value '{value}' for field '{field}'. Please check the allowed values.")
         
         return vm_request

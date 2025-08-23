@@ -71,15 +71,24 @@ class VMRequest(BaseModel):
     
     def to_taxi_payload(self) -> Dict[str, Any]:
         """Convert to TAXI API payload format"""
+        
+        # Helper function to safely get enum value
+        def get_enum_value(field):
+            if field is None:
+                return None
+            if isinstance(field, str):
+                return field
+            return field.value  # Enum instance
+        
         return {
             "resourceMetadata": {
                 "appIdentity": {
                     "type": "cvsappid",
                     "value": "APM0015867"
                 },
-                "appEnvironment": self.appEnvironment.value if self.appEnvironment else None,
-                "appEnvironmentSubtype": self.appEnvironmentSubtype.value if self.appEnvironmentSubtype else None,
-                "lineOfBusiness": self.lineOfBusiness.value if self.lineOfBusiness else None,
+                "appEnvironment": get_enum_value(self.appEnvironment),
+                "appEnvironmentSubtype": get_enum_value(self.appEnvironmentSubtype),
+                "lineOfBusiness": get_enum_value(self.lineOfBusiness),
                 "costCenter": self.costCenter,
                 "sharedEmailAddress": "TAXIAutomation@CVShealth.com"
             },
@@ -88,9 +97,9 @@ class VMRequest(BaseModel):
             "network": "VPC-aacvs-hub-trusted-nonprod-1",
             "subnet": "sn-aacvs-use4-CORP-dev-broc-sechub-vpc-testing",
             "zone": self.zone,
-            "os": self.os.value if self.os else None,
-            "useType": self.useType.value if self.useType else None,
-            "machineType": self.machineType.value if self.machineType else None,
+            "os": get_enum_value(self.os),
+            "useType": get_enum_value(self.useType),
+            "machineType": get_enum_value(self.machineType),
             "description": "Instance created via TAXI chatbot",
             "additionalDisks": [
                 {
