@@ -339,7 +339,7 @@ class ReasoningEngine:
                     {"role": "system", "content": "You are an intelligent reasoning engine. Always respond with valid JSON."},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=float(os.getenv("REASONING_TEMPERATURE", "0.7")),
+                temperature=1.0,  # gpt-5-mini only supports temperature=1.0
                 response_format={"type": "json_object"}
             )
             

@@ -395,7 +395,7 @@ class ErrorCorrectionSystem:
                     {"role": "system", "content": "You are an intelligent error correction system. Always respond with valid JSON."},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.3,  # Lower temperature for more consistent corrections
+                temperature=1.0,  # gpt-5-mini only supports temperature=1.0
                 response_format={"type": "json_object"}
             )
             
