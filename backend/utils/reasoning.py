@@ -43,6 +43,7 @@ class ReasoningContext:
     memory: Dict[str, Any]
     max_iterations: int = 5
     current_iteration: int = 0
+    simple_request: bool = False  # Flag for simple requests to reduce iterations
 
 
 class ReasoningEngine:
@@ -72,19 +73,36 @@ class ReasoningEngine:
         chain_id = f"{context.goal}_{datetime.now().timestamp()}"
         self.reasoning_chains[chain_id] = []
         
+        # Reduce iterations for simple requests
+        if context.simple_request:
+            context.max_iterations = min(2, context.max_iterations)
+        
+        # Add timeout protection
+        import asyncio
+        max_time = 5.0 if context.simple_request else 10.0  # 5s for simple, 10s for complex
+        start_time = asyncio.get_event_loop().time()
+        
         while context.current_iteration < context.max_iterations:
+            # Check timeout
+            if asyncio.get_event_loop().time() - start_time > max_time:
+                logger.warning(f"Reasoning engine timeout after {max_time}s for goal: {context.goal}")
+                break
             context.current_iteration += 1
             
             # Observe
+            logger.info(f"[ReAct] Starting observation phase, iteration {context.current_iteration}")
             observation = await self._observe(context, input_data)
             self.reasoning_chains[chain_id].append(observation)
+            logger.info(f"[ReAct] Observation complete: {observation.confidence}")
             
             if observation.state == ReasoningState.FAILED:
                 break
             
             # Think
+            logger.info(f"[ReAct] Starting thinking phase")
             thought = await self._think(context, observation)
             self.reasoning_chains[chain_id].append(thought)
+            logger.info(f"[ReAct] Thinking complete: proposed action = {thought.metadata.get('proposed_action')}")
             
             # Decide if action needed
             if self._should_act(thought):
@@ -333,6 +351,10 @@ class ReasoningEngine:
             return {}
         
         try:
+            import time
+            start = time.time()
+            logger.debug(f"[LLM] Starting API call with prompt length: {len(prompt)}")
+            
             response = self.llm.chat.completions.create(
                 model=self.model,
                 messages=[
@@ -340,8 +362,12 @@ class ReasoningEngine:
                     {"role": "user", "content": prompt}
                 ],
                 temperature=1.0,  # gpt-5-mini only supports temperature=1.0
-                response_format={"type": "json_object"}
+                response_format={"type": "json_object"},
+                timeout=3.0  # Add 3 second timeout per API call
             )
+            
+            elapsed = time.time() - start
+            logger.info(f"[LLM] API call completed in {elapsed:.2f}s")
             
             return json.loads(response.choices[0].message.content)
         except Exception as e:

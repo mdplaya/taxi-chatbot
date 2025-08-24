@@ -194,12 +194,43 @@ class ClarificationAgent(BaseAgent):
         }}
         """
         
-        result = self._llm_reason(question_prompt)
+        # Try LLM with timeout
+        import asyncio
+        try:
+            result = await asyncio.wait_for(
+                asyncio.create_task(asyncio.to_thread(self._llm_reason, question_prompt)),
+                timeout=3.0
+            )
+            questions = result.get("questions", [])
+        except asyncio.TimeoutError:
+            logger.warning("LLM timeout in clarification - using fallback questions")
+            questions = []
+        except Exception as e:
+            logger.error(f"Error generating questions: {e}")
+            questions = []
         
-        questions = result.get("questions", [])
-        
-        # Mark fields as asked
+        # Convert questions to simple format for API compatibility
+        simplified_questions = []
         for q in questions:
+            # Ensure all values are strings for Dict[str, str] compatibility
+            simplified = {
+                "field": str(q.get("field", "")),
+                "question": str(q.get("question", "")),
+                "description": ""
+            }
+            
+            # Handle suggestions if present
+            if "suggestions" in q and q["suggestions"]:
+                if isinstance(q["suggestions"], list):
+                    simplified["description"] = "Options: " + ", ".join(str(s) for s in q["suggestions"])
+                else:
+                    simplified["description"] = str(q["suggestions"])
+            elif "why_needed" in q:
+                simplified["description"] = str(q.get("why_needed", ""))
+            
+            simplified_questions.append(simplified)
+            
+            # Mark field as asked
             self.clarification_context["asked_fields"].add(q.get("field"))
         
         # Learn from question generation
@@ -211,7 +242,7 @@ class ClarificationAgent(BaseAgent):
             "timestamp": datetime.now().isoformat()
         })
         
-        return questions
+        return simplified_questions
     
     async def _check_for_corrections(self, vm_request: VMRequest, context: Dict[str, Any]) -> List[Dict[str, Any]]:
         """

@@ -36,6 +36,8 @@ class OrchestratorAgent(BaseAgent):
         self.mcp = mcp_client
         self.reasoning_engine = ReasoningEngine(self.model)
         self.error_correction = ErrorCorrectionSystem(self.model)
+        self.request_cache = {}  # Simple cache for requests
+        self.cache_ttl = 300  # 5 minutes TTL
         
         # Agent capabilities for routing
         self.available_agents = {
@@ -87,22 +89,35 @@ class OrchestratorAgent(BaseAgent):
             "timestamp": datetime.now().isoformat()
         })
         
-        # First, apply error correction if needed
-        correction_result = await self.error_correction.detect_and_correct(
-            user_input,
-            {"session_id": session_id, "agent": "orchestrator"}
-        )
+        # Optimize: Skip error correction for simple, clear requests
+        processed_input = user_input
+        skip_correction = False
         
-        if correction_result.confidence > 0.7 and correction_result.corrected != user_input:
-            logger.info(f"[Orchestrator] Applied correction: {correction_result.corrected}")
-            if correction_result.requires_confirmation:
-                # In production, would request user confirmation
-                logger.info(f"[Orchestrator] Correction requires confirmation: {correction_result.reasoning}")
+        # Check if request is simple and clear
+        if len(user_input) < 50 and any(keyword in user_input.lower() for keyword in ['vm', 'virtual machine', 'instance', 'server']):
+            skip_correction = True
+            logger.info(f"[Orchestrator] Skipping error correction for simple request: {user_input}")
         
-        # Use corrected input for processing
-        processed_input = correction_result.corrected
+        if not skip_correction:
+            # Apply error correction only for complex/unclear requests
+            correction_result = await self.error_correction.detect_and_correct(
+                user_input,
+                {"session_id": session_id, "agent": "orchestrator"}
+            )
+            
+            if correction_result.confidence > 0.7 and correction_result.corrected != user_input:
+                logger.info(f"[Orchestrator] Applied correction: {correction_result.corrected}")
+                if correction_result.requires_confirmation:
+                    # In production, would request user confirmation
+                    logger.info(f"[Orchestrator] Correction requires confirmation: {correction_result.reasoning}")
+            
+            # Use corrected input for processing
+            processed_input = correction_result.corrected
+        else:
+            logger.info(f"[Orchestrator] Using original input without correction")
         
         # Create reasoning context
+        is_simple = skip_correction  # Simple requests that skipped correction
         context = ReasoningContext(
             goal="Understand user intent and route to appropriate agent",
             constraints=[
@@ -113,23 +128,62 @@ class OrchestratorAgent(BaseAgent):
             ],
             available_actions=list(self.available_agents.keys()) + ["request_clarification"],
             history=[],
-            memory=self._get_session_memory(session_id)
+            memory=self._get_session_memory(session_id),
+            simple_request=is_simple  # Pass simple flag to reduce iterations
         )
         
-        # Use reasoning engine to determine routing
-        routing_decision, reasoning_chain = await self.reasoning_engine.reason(
-            context,
-            {
-                "user_input": processed_input,
-                "original_input": user_input if user_input != processed_input else None,
-                "session_id": session_id,
-                "conversation_history": self._get_conversation_history(session_id)
+        # Check cache first
+        cache_key = f"{processed_input}_{session_id}"
+        cached_result = self._get_cached_result(cache_key)
+        if cached_result:
+            logger.info(f"[Orchestrator] Using cached routing decision for: {processed_input[:50]}")
+            return cached_result
+        
+        # For simple requests, use a fast path
+        if is_simple and "vm" in processed_input.lower():
+            logger.info(f"[Orchestrator] Using fast path for simple VM request")
+            
+            # Extract basic requirements from the simple request
+            extracted = {}
+            if "gcp" in processed_input.lower() or "google" in processed_input.lower():
+                extracted["provider"] = "gcp"
+            if "prod" in processed_input.lower():
+                extracted["environment"] = "PROD"
+            elif any(x in processed_input.lower() for x in ["dev", "test", "nonprod"]):
+                extracted["environment"] = "NONPROD"
+            
+            routing_decision = {
+                "next_agent": "compute",
+                "context": {
+                    "intent": "create_compute",
+                    "resource_type": "vm",
+                    "provider": extracted.get("provider", "gcp"),
+                    "raw_request": processed_input,
+                    "session_id": session_id,
+                    "extracted_requirements": extracted,
+                    "missing_info": [],
+                    "conversation_history": [],
+                    "confidence": 0.9
+                },
+                "reasoning": "Simple VM request detected - routing directly to compute agent",
+                "mode": "fast_path"
             }
-        )
-        
-        # If reasoning failed, use LLM directly
-        if not routing_decision:
-            routing_decision = await self._direct_reasoning(processed_input, session_id)
+            reasoning_chain = []
+        else:
+            # Use reasoning engine for complex requests
+            routing_decision, reasoning_chain = await self.reasoning_engine.reason(
+                context,
+                {
+                    "user_input": processed_input,
+                    "original_input": user_input if user_input != processed_input else None,
+                    "session_id": session_id,
+                    "conversation_history": self._get_conversation_history(session_id)
+                }
+            )
+            
+            # If reasoning failed, use LLM directly
+            if not routing_decision:
+                routing_decision = await self._direct_reasoning(processed_input, session_id)
         
         # Store reasoning chain for audit
         self.memory.long_term[f"routing_{session_id}_{datetime.now().timestamp()}"] = {
@@ -137,6 +191,9 @@ class OrchestratorAgent(BaseAgent):
             "decision": routing_decision,
             "reasoning": [{"state": s.state.value, "content": s.content} for s in reasoning_chain]
         }
+        
+        # Cache the result
+        self._cache_result(cache_key, routing_decision)
         
         return routing_decision
     
@@ -323,6 +380,37 @@ class OrchestratorAgent(BaseAgent):
         # Adjust confidence
         confidence_adj = learning.get("confidence_adjustment", 0)
         self.confidence_threshold = min(1.0, max(0.3, self.confidence_threshold + confidence_adj))
+    
+    def _get_cached_result(self, cache_key: str) -> Optional[Dict[str, Any]]:
+        """
+        Get cached routing decision if available and not expired
+        """
+        if cache_key in self.request_cache:
+            cached = self.request_cache[cache_key]
+            if (datetime.now() - cached['timestamp']).seconds < self.cache_ttl:
+                return cached['result']
+            else:
+                # Expired, remove from cache
+                del self.request_cache[cache_key]
+        return None
+    
+    def _cache_result(self, cache_key: str, result: Dict[str, Any]):
+        """
+        Cache routing decision with timestamp
+        """
+        self.request_cache[cache_key] = {
+            'result': result,
+            'timestamp': datetime.now()
+        }
+        
+        # Clean old cache entries
+        current_time = datetime.now()
+        expired_keys = [
+            k for k, v in self.request_cache.items()
+            if (current_time - v['timestamp']).seconds > self.cache_ttl
+        ]
+        for key in expired_keys:
+            del self.request_cache[key]
     
     async def get_conversation_state(self, session_id: str) -> Dict[str, Any]:
         """

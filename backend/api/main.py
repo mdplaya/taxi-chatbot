@@ -136,11 +136,27 @@ async def chat(request: ChatRequest):
         # Process through orchestrator
         orchestrator_result = await orchestrator.process(request.message, session_id)
         
+        # Ensure we have a valid result
+        if not isinstance(orchestrator_result, dict):
+            logger.error(f"Invalid orchestrator result type: {type(orchestrator_result)}")
+            return ChatResponse(
+                response="I'm having trouble processing your request. Please try again.",
+                needs_clarification=False,
+                session_id=session_id,
+                status="error",
+                mode=current_mode
+            )
+        
         # Handle routing based on next agent
-        if orchestrator_result["next_agent"] == "compute":
+        if orchestrator_result.get("next_agent") == "compute":
             # Process through compute agent
             compute_agent = ComputeAgent()
             compute_result = await compute_agent.process(orchestrator_result["context"])
+            
+            # Check compute result is valid
+            if not isinstance(compute_result, dict):
+                logger.error(f"Invalid compute result type: {type(compute_result)}, value: {compute_result}")
+                compute_result = {"needs_clarification": True, "vm_request": {}}
             
             # Update session with extracted requirements
             if "vm_request" in compute_result:
@@ -151,20 +167,38 @@ async def chat(request: ChatRequest):
             
             # Check if clarification needed
             if compute_result.get("needs_clarification"):
-                clarification_agent = ClarificationAgent()
-                clarification_result = await clarification_agent.get_clarifications(
-                    session.vm_request,
-                    request.message
-                )
+                # For now, return a simple clarification response without LLM
+                missing = compute_result.get("missing_fields", [])
                 
-                if not clarification_result["complete"]:
+                # Create simple questions for missing fields
+                simple_questions = []
+                field_prompts = {
+                    "appEnvironment": "What environment is this for? (PROD or NONPROD)",
+                    "lineOfBusiness": "Which line of business? (RETAIL, ISTS, or EDML)",
+                    "costCenter": "What's the 5-digit cost center code?",
+                    "project": "What's your GCP project ID?",
+                    "zone": "Which GCP zone? (e.g., us-central1-a)",
+                    "os": "Which OS? (LINUX_RHEL8, LINUX_RHEL9, WINDOWS_19, or WINDOWS_22)",
+                    "useType": "What's the use type? (app or database)",
+                    "machineType": "What machine type? (e.g., e2-small, n1-standard-1)",
+                    "id": "What should we name this VM?"
+                }
+                
+                for field in missing[:3]:  # Ask for 3 fields at a time
+                    simple_questions.append({
+                        "field": field,
+                        "question": field_prompts.get(field, f"What's the {field}?"),
+                        "description": ""
+                    })
+                
+                if simple_questions:
                     session.status = "gathering_info"
                     sessions[session_id] = session
                     
                     return ChatResponse(
                         response="I need some additional information to create your VM:",
                         needs_clarification=True,
-                        questions=clarification_result["questions"],
+                        questions=simple_questions,
                         session_id=session_id,
                         status=session.status,
                         mode=current_mode
@@ -241,7 +275,9 @@ async def chat(request: ChatRequest):
             )
     
     except Exception as e:
+        import traceback
         logger.error(f"Error processing chat: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
         return ChatResponse(
             response=f"An error occurred: {str(e)}",
             needs_clarification=False,

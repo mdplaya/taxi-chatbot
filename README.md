@@ -1,5 +1,14 @@
 # TAXI Chatbot - Infrastructure Provisioning Assistant
 
+## ⚡ Performance Updates
+
+Recent optimizations have significantly improved system performance:
+- **Response Time**: Simple VM requests now respond in under 1 second (previously 10+ seconds)
+- **API Efficiency**: Reduced API calls from 10+ to 1-2 for simple requests
+- **UI Fix**: Chat input field now properly displays typed text
+- **Reliability**: Added timeouts and fallbacks to prevent hanging
+- See `PERFORMANCE_FIXES.md` for technical details
+
 ## 🚀 Quick Start (for Monday Demo)
 
 ### Prerequisites

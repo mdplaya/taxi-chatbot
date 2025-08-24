@@ -255,7 +255,7 @@ export default function Chat() {
                 onKeyPress={(e) => e.key === 'Enter' && !loading && sendMessage()}
                 placeholder="Type your message..."
                 disabled={loading}
-                className="flex-1 px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
+                className="flex-1 px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600 text-gray-900 bg-white"
               />
               <button
                 onClick={sendMessage}
