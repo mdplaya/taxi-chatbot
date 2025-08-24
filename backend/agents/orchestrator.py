@@ -3,7 +3,7 @@ Orchestrator Agent - Routes requests using pure LLM reasoning
 NO pattern matching, NO hardcoded rules
 """
 
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, Union
 import logging
 import json
 import sys
@@ -74,11 +74,23 @@ class OrchestratorAgent(BaseAgent):
             }
         ]
     
-    async def process(self, user_input: str, session_id: str = None, progress_callback=None) -> Dict[str, Any]:
+    async def process(self, context: Any, session_id: str = None, progress_callback=None) -> Dict[str, Any]:
         """
         Process user request using pure LLM reasoning
         NO pattern matching allowed
         """
+        # Handle both string and dict inputs for compatibility
+        if isinstance(context, str):
+            user_input = context
+            conversation_history = []
+        elif isinstance(context, dict):
+            user_input = context.get("message", context.get("raw_request", ""))
+            session_id = context.get("session_id", session_id)
+            conversation_history = context.get("conversation_history", [])
+        else:
+            user_input = str(context)
+            conversation_history = []
+        
         logger.info(f"[Orchestrator] Processing: {user_input}")
         
         # Set progress callback if provided
@@ -102,7 +114,7 @@ class OrchestratorAgent(BaseAgent):
         skip_correction = False
         
         # Check if request is simple and clear
-        if len(user_input) < 50 and any(keyword in user_input.lower() for keyword in ['vm', 'virtual machine', 'instance', 'server']):
+        if isinstance(user_input, str) and len(user_input) < 50 and any(keyword in user_input.lower() for keyword in ['vm', 'virtual machine', 'instance', 'server']):
             skip_correction = True
             logger.info(f"[Orchestrator] Skipping error correction for simple request: {user_input}")
         
