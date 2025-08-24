@@ -1,0 +1,15 @@
+fastapi
+uvicorn[standard]
+pydantic
+pydantic[email]
+pydantic-settings
+marvin==2.3.0
+httpx
+python-multipart
+python-dotenv
+asyncio
+typing-extensions
+openai
+tenacity
+sse-starlette
+valkey==6.1.1
