@@ -77,9 +77,12 @@ class ReasoningEngine:
         if context.simple_request:
             context.max_iterations = min(2, context.max_iterations)
         
-        # Add timeout protection
+        # Add timeout protection with configurable values
         import asyncio
-        max_time = 5.0 if context.simple_request else 10.0  # 5s for simple, 10s for complex
+        # Use environment variables for timeouts, with sensible defaults
+        simple_timeout = float(os.getenv('REASONING_TIMEOUT_SIMPLE', '60.0'))  # 60s for simple requests
+        complex_timeout = float(os.getenv('REASONING_TIMEOUT_COMPLEX', '120.0'))  # 120s for complex requests
+        max_time = simple_timeout if context.simple_request else complex_timeout
         start_time = asyncio.get_event_loop().time()
         
         while context.current_iteration < context.max_iterations:
@@ -363,7 +366,7 @@ class ReasoningEngine:
                 ],
                 temperature=1.0,  # gpt-5-mini only supports temperature=1.0
                 response_format={"type": "json_object"},
-                timeout=3.0  # Add 3 second timeout per API call
+                timeout=60.0  # Increased timeout to 60 seconds for production use
             )
             
             elapsed = time.time() - start

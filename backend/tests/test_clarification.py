@@ -170,7 +170,7 @@ class TestClarificationAgent:
             id="test@example.com"
         )
         
-        result = await agent.get_clarifications(vm_request, "")
+        result = await agent.get_clarifications(vm_request, {'raw_request': 'I need a production VM', 'conversation_history': [], 'session_id': 'test-complete'})
         
         assert result["complete"] == True
         assert "vm_request" in result
@@ -186,7 +186,7 @@ class TestClarificationAgent:
             costCenter="12345"
         )
         
-        result = await agent.get_clarifications(vm_request, "")
+        result = await agent.get_clarifications(vm_request, {'raw_request': 'Deploy RHEL8 VM', 'conversation_history': [], 'session_id': 'test-missing'})
         
         assert result["complete"] == False
         assert len(result["questions"]) > 0
@@ -204,6 +204,47 @@ class TestClarificationAgent:
         # Should not ask about provided fields
         assert "os" not in question_fields
         assert "costCenter" not in question_fields
+    
+    @pytest.mark.asyncio
+    async def test_get_clarifications_with_string_context(self):
+        """Test backward compatibility with string context"""
+        agent = ClarificationAgent()
+        
+        vm_request = VMRequest(
+            os=OS.LINUX_RHEL8,
+            costCenter="12345"
+        )
+        
+        # Test with string context (backward compatibility)
+        result = await agent.get_clarifications(vm_request, "I need a VM for production")
+        
+        assert result["complete"] == False
+        assert len(result["questions"]) > 0
+    
+    @pytest.mark.asyncio
+    async def test_get_clarifications_with_dict_context(self):
+        """Test with proper dict context"""
+        agent = ClarificationAgent()
+        
+        vm_request = VMRequest(
+            os=OS.LINUX_RHEL8,
+            costCenter="12345"
+        )
+        
+        context = {
+            'raw_request': 'I need a RHEL8 VM in production for retail',
+            'conversation_history': [
+                {'role': 'user', 'content': 'I need a VM'},
+                {'role': 'assistant', 'content': 'What OS do you need?'},
+                {'role': 'user', 'content': 'RHEL8'}
+            ],
+            'session_id': 'test-dict-context'
+        }
+        
+        result = await agent.get_clarifications(vm_request, context)
+        
+        assert result["complete"] == False
+        assert len(result["questions"]) > 0
 
 if __name__ == "__main__":
     # Run tests

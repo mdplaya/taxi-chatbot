@@ -43,13 +43,25 @@ export default function Chat() {
   const [loading, setLoading] = useState(false)
   const [answers, setAnswers] = useState<Record<string, string>>({})
   const [systemMode, setSystemMode] = useState<'online' | 'offline' | null>(null)
+  const [progressMessage, setProgressMessage] = useState<string>('')
+  const [progressPercentage, setProgressPercentage] = useState<number>(0)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const eventSourceRef = useRef<EventSource | null>(null)
   
   const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
   
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
+  
+  // Cleanup EventSource on unmount
+  useEffect(() => {
+    return () => {
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close()
+      }
+    }
+  }, [])
   
   // Check system status on mount
   useEffect(() => {
@@ -78,16 +90,111 @@ export default function Chat() {
       text: input
     }
     
+    const currentInput = input
     setMessages(prev => [...prev, userMessage])
     setInput('')
     setLoading(true)
+    setProgressMessage('Connecting...')
+    setProgressPercentage(0)
     
+    // Check if SSE is supported
+    const useSSE = typeof EventSource !== 'undefined'
+    
+    if (useSSE) {
+      // Use SSE for real-time updates
+      try {
+        // Close any existing connection
+        if (eventSourceRef.current) {
+          eventSourceRef.current.close()
+        }
+        
+        // Create SSE connection
+        const params = new URLSearchParams({
+          message: currentInput,
+          session_id: sessionId || ''
+        })
+        
+        const eventSource = new EventSource(`${API_URL}/chat/stream?${params}`)
+        eventSourceRef.current = eventSource
+        
+        eventSource.addEventListener('connected', (event) => {
+          const data = JSON.parse(event.data)
+          setSessionId(data.session_id)
+          setSystemMode(data.mode)
+        })
+        
+        eventSource.addEventListener('progress', (event) => {
+          const data = JSON.parse(event.data)
+          setProgressMessage(data.message || 'Processing...')
+          if (data.percentage !== undefined) {
+            setProgressPercentage(data.percentage)
+          }
+        })
+        
+        eventSource.addEventListener('clarification', (event) => {
+          const data = JSON.parse(event.data)
+          const botMessage: Message = {
+            id: (Date.now() + 1).toString(),
+            type: 'questions',
+            text: data.response,
+            questions: data.questions
+          }
+          setMessages(prev => [...prev, botMessage])
+          setLoading(false)
+          eventSource.close()
+        })
+        
+        eventSource.addEventListener('complete', (event) => {
+          const data = JSON.parse(event.data)
+          const botMessage: Message = {
+            id: (Date.now() + 1).toString(),
+            type: 'bot',
+            text: data.response,
+            payload: data.final_payload
+          }
+          setMessages(prev => [...prev, botMessage])
+          setLoading(false)
+          eventSource.close()
+        })
+        
+        eventSource.addEventListener('error', (event: any) => {
+          console.error('SSE Error:', event)
+          if (event.data) {
+            const data = JSON.parse(event.data)
+            setMessages(prev => [...prev, {
+              id: (Date.now() + 1).toString(),
+              type: 'bot',
+              text: `Error: ${data.error || 'Connection failed'}`
+            }])
+          }
+          setLoading(false)
+          eventSource.close()
+        })
+        
+        eventSource.onerror = () => {
+          // Fallback to regular fetch if SSE fails
+          sendMessageFallback(currentInput)
+          eventSource.close()
+        }
+        
+      } catch (error) {
+        console.error('SSE Error:', error)
+        // Fallback to regular fetch
+        sendMessageFallback(currentInput)
+      }
+    } else {
+      // Use regular fetch as fallback
+      sendMessageFallback(currentInput)
+    }
+  }
+  
+  const sendMessageFallback = async (messageText: string) => {
     try {
       const response = await fetch(`${API_URL}/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          message: input,
+          message: messageText,
           session_id: sessionId
         })
       })
@@ -116,9 +223,11 @@ export default function Chat() {
         type: 'bot',
         text: 'Sorry, I encountered an error. Please try again.'
       }])
+    } finally {
+      setLoading(false)
+      setProgressMessage('')
+      setProgressPercentage(0)
     }
-    
-    setLoading(false)
   }
   
   const submitAnswers = async () => {
@@ -233,7 +342,20 @@ export default function Chat() {
             
             {loading && (
               <div className="flex justify-start">
-                <div className="bg-gray-100 rounded-lg p-3">
+                <div className="bg-gray-100 rounded-lg p-3 max-w-md">
+                  {progressMessage && (
+                    <div className="mb-2">
+                      <div className="text-sm text-gray-600 mb-1">{progressMessage}</div>
+                      {progressPercentage > 0 && (
+                        <div className="w-full bg-gray-200 rounded-full h-2">
+                          <div 
+                            className="bg-blue-600 h-2 rounded-full transition-all duration-500"
+                            style={{width: `${progressPercentage}%`}}
+                          ></div>
+                        </div>
+                      )}
+                    </div>
+                  )}
                   <div className="flex space-x-2">
                     <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce"></div>
                     <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{animationDelay: '0.1s'}}></div>

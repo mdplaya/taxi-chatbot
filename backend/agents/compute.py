@@ -236,9 +236,23 @@ class ComputeAgent:
     def __init__(self, mcp_client=None):
         self.mcp = mcp_client
         self.logger = logging.getLogger(self.__class__.__name__)
+        self.progress_callback = None
     
-    async def process(self, context: Dict[str, Any]) -> Dict[str, Any]:
+    async def emit_progress(self, step: str, message: str, percentage: int = None):
+        """Emit progress update if callback is set"""
+        if self.progress_callback:
+            try:
+                await self.progress_callback("Compute", step, message, percentage)
+            except Exception as e:
+                self.logger.error(f"Error emitting progress: {e}")
+    
+    async def process(self, context: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
         """Process compute request and extract requirements"""
+        
+        # Set progress callback if provided
+        if progress_callback:
+            self.progress_callback = progress_callback
+            await self.emit_progress("extracting", "Extracting VM requirements...", 10)
         
         provider = context.get("provider")
         raw_request = context.get("raw_request", "")
@@ -246,12 +260,18 @@ class ComputeAgent:
         
         self.logger.info(f"Processing compute request for provider: {provider}")
         
+        if progress_callback:
+            await self.emit_progress("detecting_provider", "Detecting cloud provider...", 30)
+        
         # Determine which extraction method to use
         mode = llm_manager.get_mode()
         requirements = {}
         
         try:
             if mode == "online" and extract_vm_requirements_llm:
+                if progress_callback:
+                    await self.emit_progress("analyzing", "Analyzing requirements with AI...", 50)
+                
                 # Try LLM extraction with timeout
                 result = await llm_manager.call_with_timeout(
                     extract_vm_requirements_llm,

@@ -74,12 +74,20 @@ class OrchestratorAgent(BaseAgent):
             }
         ]
     
-    async def process(self, user_input: str, session_id: str = None) -> Dict[str, Any]:
+    async def process(self, user_input: str, session_id: str = None, progress_callback=None) -> Dict[str, Any]:
         """
         Process user request using pure LLM reasoning
         NO pattern matching allowed
         """
         logger.info(f"[Orchestrator] Processing: {user_input}")
+        
+        # Set progress callback if provided
+        if progress_callback:
+            self.progress_callback = progress_callback
+        
+        # Emit initial progress
+        if self.progress_callback:
+            await self.emit_progress("analyzing", "Analyzing user request...", 10)
         
         # Store in memory
         self.memory.short_term.append({
@@ -115,6 +123,10 @@ class OrchestratorAgent(BaseAgent):
             processed_input = correction_result.corrected
         else:
             logger.info(f"[Orchestrator] Using original input without correction")
+        
+        # Emit progress for intent detection
+        if self.progress_callback:
+            await self.emit_progress("detecting_intent", "Determining request intent...", 30)
         
         # Create reasoning context
         is_simple = skip_correction  # Simple requests that skipped correction
@@ -194,6 +206,11 @@ class OrchestratorAgent(BaseAgent):
         
         # Cache the result
         self._cache_result(cache_key, routing_decision)
+        
+        # Emit routing progress
+        if self.progress_callback:
+            next_agent = routing_decision.get("next_agent", "unknown")
+            await self.emit_progress("routing", f"Routing to {next_agent} agent...", 50)
         
         return routing_decision
     

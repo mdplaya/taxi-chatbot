@@ -17,7 +17,8 @@ class LLMManager:
     def __init__(self):
         """Initialize the LLM Manager."""
         self.api_key = os.getenv("OPENAI_API_KEY")
-        self.timeout = int(os.getenv("LLM_TIMEOUT", "3000")) / 1000  # Convert to seconds
+        # Production timeout: 75 seconds to handle complex LLM operations
+        self.timeout = int(os.getenv("LLM_TIMEOUT", "75000")) / 1000  # Convert to seconds (default: 75s)
         self.cache_ttl = int(os.getenv("LLM_CACHE_TTL", "300"))  # 5 minutes default
         self._mode_cache = {"mode": None, "timestamp": 0}
         self._check_initial_mode()

@@ -138,8 +138,18 @@ class VMRequest(BaseModel):
             }
         }
 
+class ProgressStep(BaseModel):
+    """Individual progress step in the agent pipeline"""
+    timestamp: datetime
+    agent: str  # Name of the agent performing the step
+    step: str  # Description of what's happening
+    status: Literal["started", "in_progress", "completed", "failed"]
+    percentage: Optional[int] = None  # 0-100 progress percentage
+    message: str  # User-friendly message
+    metadata: Dict[str, Any] = {}
+
 class ChatSession(BaseModel):
-    """Track conversation state"""
+    """Track conversation state with progress tracking"""
     session_id: str
     created_at: datetime
     vm_request: VMRequest
@@ -147,3 +157,30 @@ class ChatSession(BaseModel):
     messages: List[Dict[str, Any]] = []
     taxi_payload: Optional[Dict[str, Any]] = None
     taxi_response: Optional[Dict[str, Any]] = None
+    
+    # Progress tracking fields
+    progress_steps: List[ProgressStep] = []
+    current_agent: Optional[str] = None
+    current_step: Optional[str] = None
+    last_progress_update: Optional[datetime] = None
+    
+    def add_progress(self, agent: str, step: str, message: str, 
+                    status: str = "in_progress", percentage: Optional[int] = None) -> ProgressStep:
+        """Add a progress step to the session"""
+        progress = ProgressStep(
+            timestamp=datetime.now(),
+            agent=agent,
+            step=step,
+            status=status,
+            percentage=percentage,
+            message=message
+        )
+        self.progress_steps.append(progress)
+        self.current_agent = agent
+        self.current_step = step
+        self.last_progress_update = datetime.now()
+        return progress
+    
+    def get_latest_progress(self, limit: int = 10) -> List[ProgressStep]:
+        """Get the most recent progress steps"""
+        return self.progress_steps[-limit:] if self.progress_steps else []

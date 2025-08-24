@@ -1,5 +1,7 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from sse_starlette.sse import EventSourceResponse
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List, Literal
 import logging
@@ -8,6 +10,8 @@ from datetime import datetime
 import os
 from dotenv import load_dotenv
 import sys
+import asyncio
+import json
 
 # Add backend to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -17,8 +21,9 @@ from agents.orchestrator import OrchestratorAgent
 from agents.clarification import ClarificationAgent
 from agents.compute import ComputeAgent
 from agents.gce_specialist import GCESpecialistAgent
-from models.taxi_models import VMRequest, ChatSession
+from models.taxi_models import VMRequest, ChatSession, ProgressStep
 from utils.llm_manager import llm_manager
+from utils.progress_manager import progress_manager
 
 # Load environment variables
 load_dotenv()
@@ -234,7 +239,11 @@ async def chat(request: ChatRequest):
                         clarification_agent = ClarificationAgent()
                         clarification_result = await clarification_agent.get_clarifications(
                             session.vm_request,
-                            request.message
+                            {
+                                'raw_request': request.message,
+                                'conversation_history': session.messages if hasattr(session, 'messages') else [],
+                                'session_id': session_id
+                            }
                         )
                         
                         return ChatResponse(
@@ -311,7 +320,12 @@ async def answer_clarification(request: AnswerRequest):
     # Check if we have all required fields now
     clarification_result = await clarification_agent.get_clarifications(
         session.vm_request,
-        ""
+        {
+            'raw_request': session.messages[0] if session.messages else '',
+            'conversation_history': session.messages if hasattr(session, 'messages') else [],
+            'session_id': request.session_id,
+            'context_type': 'answer_followup'
+        }
     )
     
     if clarification_result["complete"]:
@@ -389,6 +403,216 @@ async def list_sessions():
             for sid, session in sessions.items()
         ]
     }
+
+@app.get("/chat/stream")
+async def chat_stream(request: Request, message: str, session_id: Optional[str] = None):
+    """
+    SSE endpoint for streaming chat with real-time progress updates
+    """
+    logger.info(f"SSE chat request: {message}")
+    
+    # Get or create session
+    if not session_id:
+        session_id = generate_session_id()
+    
+    if session_id not in sessions:
+        sessions[session_id] = ChatSession(
+            session_id=session_id,
+            created_at=datetime.now(),
+            vm_request=VMRequest(),
+            status="gathering_info"
+        )
+    
+    session = sessions[session_id]
+    
+    async def event_generator():
+        """Generate SSE events for the chat stream"""
+        try:
+            # Send initial connection event
+            yield {
+                "event": "connected",
+                "data": json.dumps({
+                    "session_id": session_id,
+                    "mode": llm_manager.get_mode()
+                })
+            }
+            
+            # Create progress callback for agents
+            async def progress_callback(agent: str, step: str, message: str, percentage: Optional[int]):
+                # Add to session progress
+                session.add_progress(agent, step, message, "in_progress", percentage)
+                # Add to progress manager
+                await progress_manager.add_progress(
+                    session_id, agent, step, message, percentage, "in_progress"
+                )
+            
+            # Initialize orchestrator with progress callback
+            orchestrator = OrchestratorAgent()
+            
+            # Process message with progress updates
+            await progress_manager.add_progress(
+                session_id, "Orchestrator", "analyzing", 
+                "Analyzing your request...", 10, "started"
+            )
+            
+            orchestrator_result = await orchestrator.process(message, session_id)
+            
+            # Handle response based on next agent
+            if orchestrator_result["next_agent"] == "compute":
+                await progress_manager.add_progress(
+                    session_id, "Compute", "extracting", 
+                    "Extracting VM requirements from your request...", 30, "in_progress"
+                )
+                
+                compute_agent = ComputeAgent()
+                # Create context for compute agent
+                compute_context = {
+                    "provider": orchestrator_result.get("context", {}).get("provider", "gcp"),
+                    "raw_request": message,
+                    "session_id": session_id,
+                    "conversation_history": []
+                }
+                compute_result = await compute_agent.process(compute_context)
+                
+                # Update session with extracted requirements
+                for key, value in compute_result.items():
+                    if hasattr(session.vm_request, key) and value is not None:
+                        setattr(session.vm_request, key, value)
+                
+                # Check for missing fields
+                missing = session.vm_request.get_missing_fields()
+                
+                if missing:
+                    await progress_manager.add_progress(
+                        session_id, "Clarification", "checking", 
+                        "Identifying missing information...", 50, "in_progress"
+                    )
+                    
+                    clarification_agent = ClarificationAgent()
+                    questions = await clarification_agent.generate_questions(
+                        session.vm_request, missing
+                    )
+                    
+                    # Send clarification response
+                    yield {
+                        "event": "clarification",
+                        "data": json.dumps({
+                            "response": "I need some additional information to provision your VM:",
+                            "needs_clarification": True,
+                            "questions": questions,
+                            "session_id": session_id,
+                            "status": "gathering_info"
+                        })
+                    }
+                else:
+                    # Ready to provision
+                    await progress_manager.add_progress(
+                        session_id, "GCE Specialist", "provisioning", 
+                        "Preparing TAXI payload for VM provisioning...", 80, "in_progress"
+                    )
+                    
+                    gce_agent = GCESpecialistAgent()
+                    provision_result = gce_agent.provision(session.vm_request)
+                    
+                    session.taxi_payload = provision_result.get("payload")
+                    session.taxi_response = provision_result.get("response")
+                    session.status = "complete" if provision_result.get("success") else "failed"
+                    
+                    await progress_manager.add_progress(
+                        session_id, "GCE Specialist", "complete", 
+                        "VM provisioning request completed", 100, "completed"
+                    )
+                    
+                    # Send final response
+                    yield {
+                        "event": "complete",
+                        "data": json.dumps({
+                            "response": provision_result.get("message", "VM provisioning completed"),
+                            "needs_clarification": False,
+                            "session_id": session_id,
+                            "final_payload": session.taxi_payload,
+                            "status": session.status
+                        })
+                    }
+            
+            else:
+                # Other flows not fully implemented
+                yield {
+                    "event": "message",
+                    "data": json.dumps({
+                        "response": f"Processing with {orchestrator_result['next_agent']} agent...",
+                        "session_id": session_id
+                    })
+                }
+                
+        except Exception as e:
+            logger.error(f"Error in SSE stream: {e}")
+            yield {
+                "event": "error",
+                "data": json.dumps({
+                    "error": str(e),
+                    "session_id": session_id
+                })
+            }
+    
+    return EventSourceResponse(event_generator())
+
+@app.get("/session/{session_id}/progress")
+async def get_session_progress(
+    session_id: str,
+    limit: int = 10,
+    since_timestamp: Optional[str] = None
+):
+    """
+    Get recent progress events for a session (polling fallback)
+    """
+    if session_id not in sessions:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    since_dt = None
+    if since_timestamp:
+        try:
+            since_dt = datetime.fromisoformat(since_timestamp)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid timestamp format")
+    
+    # Get progress from manager
+    events = progress_manager.get_recent_progress(session_id, limit, since_dt)
+    summary = progress_manager.get_session_progress_summary(session_id)
+    
+    return {
+        "session_id": session_id,
+        "summary": summary,
+        "events": events
+    }
+
+@app.get("/session/{session_id}/progress/stream")
+async def stream_session_progress(session_id: str):
+    """
+    SSE endpoint for streaming progress updates only
+    """
+    if session_id not in sessions:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    async def progress_stream():
+        """Generate SSE stream from progress manager"""
+        async for event in progress_manager.create_sse_stream(session_id):
+            yield event
+    
+    return EventSourceResponse(progress_stream())
+
+# Start progress manager cleanup task on startup
+@app.on_event("startup")
+async def startup_event():
+    """Initialize background tasks"""
+    await progress_manager.start_cleanup_task()
+    logger.info("Progress manager cleanup task started")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Cleanup on shutdown"""
+    progress_manager.stop_cleanup_task()
+    logger.info("Progress manager cleanup task stopped")
 
 if __name__ == "__main__":
     import uvicorn as uv

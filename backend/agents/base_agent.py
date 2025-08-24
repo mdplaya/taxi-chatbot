@@ -4,7 +4,7 @@ No pattern matching, pure LLM reasoning
 """
 
 from abc import ABC, abstractmethod
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, Callable
 from datetime import datetime
 import json
 import logging
@@ -12,6 +12,7 @@ from openai import OpenAI
 from pydantic import BaseModel, Field
 import os
 from enum import Enum
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,11 @@ class BaseAgent(ABC):
         self.max_reasoning_depth = int(os.getenv("MAX_REASONING_DEPTH", "5"))
         self.confidence_threshold = float(os.getenv("DECISION_CONFIDENCE_THRESHOLD", "0.6"))
         
+        # Progress tracking
+        self.progress_callback: Optional[Callable] = None
+        self.current_step = 0
+        self.total_steps = 0
+        
         # Initialize OpenAI client
         api_key = os.getenv("OPENAI_API_KEY")
         if api_key:
@@ -71,6 +77,35 @@ class BaseAgent(ABC):
         else:
             logger.warning(f"[{self.name}] No OpenAI API key configured - agent will have limited capabilities")
             self.llm = None
+    
+    def set_progress_callback(self, callback: Callable[[str, str, int], None]):
+        """
+        Set a callback for progress updates
+        callback(agent_name, message, percentage)
+        """
+        self.progress_callback = callback
+    
+    async def emit_progress(self, step: str, message: str, percentage: Optional[int] = None):
+        """
+        Emit a progress update
+        
+        Args:
+            step: Current step being performed
+            message: User-friendly message about what's happening
+            percentage: Optional progress percentage (0-100)
+        """
+        if self.progress_callback:
+            try:
+                # Calculate percentage if not provided
+                if percentage is None and self.total_steps > 0:
+                    percentage = int((self.current_step / self.total_steps) * 100)
+                
+                # Call the progress callback
+                await self.progress_callback(self.name, step, message, percentage)
+                
+                logger.info(f"[{self.name}] Progress: {step} - {message} ({percentage}%)")
+            except Exception as e:
+                logger.error(f"Error emitting progress: {e}")
     
     def observe(self, input_data: Any) -> Thought:
         """
@@ -356,18 +391,24 @@ class BaseAgent(ABC):
         """
         pass
     
-    def process(self, input_data: Any) -> Tuple[Any, List[Thought]]:
+    async def process(self, input_data: Any) -> Tuple[Any, List[Thought]]:
         """
         Main processing loop - implements ReAct pattern
         Observe -> Think -> Act -> Reflect
         """
         # Clear reasoning chain for new process
         self.reasoning_chain = []
+        self.total_steps = 4  # Observe, Think, Act, Reflect
+        self.current_step = 0
         
         # Observe
+        self.current_step += 1
+        await self.emit_progress("observing", "Analyzing input and understanding context", 25)
         observation = self.observe(input_data)
         
         # Think (iterate up to max depth)
+        self.current_step += 1
+        await self.emit_progress("thinking", "Processing information and planning next steps", 50)
         current_thought = observation
         for depth in range(self.max_reasoning_depth):
             reasoning = self.think(current_thought)
@@ -375,6 +416,9 @@ class BaseAgent(ABC):
             # Act if ready
             action = self.act(reasoning)
             if action:
+                self.current_step += 1
+                await self.emit_progress("acting", f"Executing action: {action.name}", 75)
+                
                 # Execute action
                 if action.requires_confirmation:
                     logger.info(f"[{self.name}] Action requires confirmation: {action.name}")
@@ -383,6 +427,8 @@ class BaseAgent(ABC):
                 outcome = self.execute_action(action)
                 
                 # Reflect on outcome
+                self.current_step += 1
+                await self.emit_progress("reflecting", "Evaluating results and learning", 90)
                 reflection = self.reflect(action, outcome)
                 
                 # Add to short-term memory

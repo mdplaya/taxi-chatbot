@@ -3,7 +3,7 @@ Clarification Agent - Natural conversation for gathering information
 NO templates, pure LLM-driven conversation
 """
 
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 import logging
 import json
 import sys
@@ -73,15 +73,56 @@ class ClarificationAgent(BaseAgent):
             }
         ]
     
-    async def get_clarifications(self, vm_request: VMRequest, context: Dict[str, Any]) -> Dict[str, Any]:
+    async def generate_questions(self, vm_request: VMRequest, missing_fields: List[str], progress_callback=None) -> List[Dict[str, str]]:
+        """
+        Generate questions for missing fields (simplified wrapper for SSE endpoint)
+        """
+        if progress_callback:
+            self.progress_callback = progress_callback
+            await self.emit_progress("analyzing", "Analyzing missing information...", 10)
+        
+        # Use the existing _generate_natural_questions method
+        context = {"missing_fields": missing_fields}
+        questions = await self._generate_natural_questions(missing_fields, vm_request, context)
+        
+        if progress_callback:
+            await self.emit_progress("complete", "Questions generated", 100)
+        
+        return questions
+    
+    async def get_clarifications(self, vm_request: VMRequest, context: Union[Dict[str, Any], str], progress_callback=None) -> Dict[str, Any]:
         """
         Generate natural clarification conversation
         NO templates - pure LLM reasoning
         """
+        # Defensive type checking for backward compatibility
+        if isinstance(context, str):
+            logger.warning(f"Context passed as string instead of dict: '{context[:50]}...'")
+            context = {
+                'raw_request': context if context else '',
+                'conversation_history': [],
+                'session_id': None
+            }
+        elif not isinstance(context, dict):
+            logger.error(f"Invalid context type: {type(context)}")
+            context = {
+                'raw_request': '',
+                'conversation_history': [],
+                'session_id': None
+            }
+        
+        # Set progress callback if provided
+        if progress_callback:
+            self.progress_callback = progress_callback
+            await self.emit_progress("reviewing", "Reviewing current information...", 20)
+        
         missing_fields = vm_request.get_missing_fields()
         
         # Show what we know first
         known_info = await self._show_known_info(vm_request, missing_fields)
+        
+        if progress_callback:
+            await self.emit_progress("identifying", "Identifying missing fields...", 40)
         
         if not missing_fields:
             # Everything complete - confirm before proceeding
@@ -194,16 +235,18 @@ class ClarificationAgent(BaseAgent):
         }}
         """
         
-        # Try LLM with timeout
+        # Try LLM with timeout - increased for production use
         import asyncio
         try:
+            # Use configurable timeout from environment, default to 60 seconds
+            clarification_timeout = float(os.getenv('CLARIFICATION_TIMEOUT', '60.0'))
             result = await asyncio.wait_for(
                 asyncio.create_task(asyncio.to_thread(self._llm_reason, question_prompt)),
-                timeout=3.0
+                timeout=clarification_timeout
             )
             questions = result.get("questions", [])
         except asyncio.TimeoutError:
-            logger.warning("LLM timeout in clarification - using fallback questions")
+            logger.warning(f"LLM timeout in clarification after {clarification_timeout}s - using fallback questions")
             questions = []
         except Exception as e:
             logger.error(f"Error generating questions: {e}")
