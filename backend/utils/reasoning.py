@@ -51,7 +51,7 @@ class ReasoningEngine:
     All decisions through LLM reasoning - no hardcoded rules
     """
     
-    def __init__(self, model: str = "gpt-4"):
+    def __init__(self, model: str = "gpt-5-mini"):
         self.model = model
         self.reasoning_chains: Dict[str, List[ReasoningStep]] = {}
         self.safety_checks: List[Callable] = []

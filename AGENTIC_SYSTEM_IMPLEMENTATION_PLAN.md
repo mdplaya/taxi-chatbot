@@ -186,7 +186,7 @@ Transform the current rules-based TAXI chatbot into a truly agentic system with 
 - [ ] Update `.env` with:
   ```
   # Agent Framework
-  AGENT_REASONING_MODEL=gpt-4
+  AGENT_REASONING_MODEL=gpt-5-mini
   AGENT_MEMORY_TTL=86400
   MAX_REASONING_DEPTH=5
   REASONING_TEMPERATURE=0.7

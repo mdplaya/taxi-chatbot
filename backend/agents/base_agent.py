@@ -54,7 +54,7 @@ class BaseAgent(ABC):
     All decisions made through LLM reasoning, no hardcoded rules
     """
     
-    def __init__(self, name: str, goal: str, model: str = "gpt-4"):
+    def __init__(self, name: str, goal: str, model: str = "gpt-5-mini"):
         self.name = name
         self.goal = goal
         self.model = model

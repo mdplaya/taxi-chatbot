@@ -29,7 +29,7 @@ class ClarificationAgent(BaseAgent):
         super().__init__(
             name="Clarification",
             goal="Gather missing information through natural, friendly conversation",
-            model=os.getenv("AGENT_REASONING_MODEL", "gpt-4")
+            model=os.getenv("AGENT_REASONING_MODEL", "gpt-5-mini")
         )
         
         self.mcp = mcp_client

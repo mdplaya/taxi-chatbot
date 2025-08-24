@@ -44,7 +44,7 @@ class ErrorCorrectionSystem:
     NO pattern matching or hardcoded rules
     """
     
-    def __init__(self, model: str = "gpt-4"):
+    def __init__(self, model: str = "gpt-5-mini"):
         self.model = model
         self.learned_patterns: Dict[str, CorrectionPattern] = {}
         self.correction_history: List[Dict[str, Any]] = []

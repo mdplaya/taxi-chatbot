@@ -30,7 +30,7 @@ class OrchestratorAgent(BaseAgent):
         super().__init__(
             name="Orchestrator",
             goal="Understand user intent and route to appropriate specialist agents",
-            model=os.getenv("AGENT_REASONING_MODEL", "gpt-4")
+            model=os.getenv("AGENT_REASONING_MODEL", "gpt-5-mini")
         )
         
         self.mcp = mcp_client
