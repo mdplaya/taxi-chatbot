@@ -22,8 +22,10 @@ from agents.clarification import ClarificationAgent
 from agents.compute import ComputeAgent
 from agents.gce_specialist import GCESpecialistAgent
 from models.taxi_models import VMRequest, ChatSession, ProgressStep
+from models.agent_session import AgentSession, ConversationState
 from utils.llm_manager import llm_manager
 from utils.progress_manager import progress_manager
+from utils.valkey_manager import valkey_manager
 
 # Load environment variables
 load_dotenv()
@@ -52,8 +54,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# In-memory session storage (use Redis in production)
-sessions: Dict[str, ChatSession] = {}
+# Session storage now handled by Valkey
+# Legacy in-memory sessions for backward compatibility
+legacy_sessions: Dict[str, ChatSession] = {}
+
+async def get_session(session_id: str) -> Optional[AgentSession]:
+    """Get session from Valkey"""
+    session_data = await valkey_manager.load_session(session_id)
+    if session_data:
+        return AgentSession.from_valkey_dict(session_data)
+    return None
+
+async def save_session(session: AgentSession) -> bool:
+    """Save session to Valkey"""
+    return await valkey_manager.save_session(
+        session.session_id,
+        session.to_valkey_dict()
+    )
 
 class ChatRequest(BaseModel):
     """Chat request from client"""
@@ -94,11 +111,14 @@ async def root():
 async def health():
     """Health check endpoint"""
     current_mode = llm_manager.get_mode()
+    valkey_healthy = await valkey_manager.health_check()
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
         "mode": current_mode,
-        "llm_available": current_mode == "online"
+        "llm_available": current_mode == "online",
+        "valkey_status": "connected" if valkey_healthy else "disconnected",
+        "model_config": llm_manager.get_model_config()
     }
 
 @app.get("/status")
@@ -108,7 +128,7 @@ async def status():
     return {
         "mode": current_mode,
         "description": "AI-powered responses" if current_mode == "online" else "Pattern-based responses",
-        "active_sessions": len(sessions)
+        "active_sessions": len(legacy_sessions)
     }
 
 @app.post("/chat", response_model=ChatResponse)
@@ -121,15 +141,15 @@ async def chat(request: ChatRequest):
     # Get or create session
     session_id = request.session_id or generate_session_id()
     
-    if session_id not in sessions:
-        sessions[session_id] = ChatSession(
+    if session_id not in legacy_sessions:
+        legacy_sessions[session_id] = ChatSession(
             session_id=session_id,
             created_at=datetime.now(),
             vm_request=VMRequest(),
             status="gathering_info"
         )
     
-    session = sessions[session_id]
+    session = legacy_sessions[session_id]
     
     # Initialize orchestrator
     orchestrator = OrchestratorAgent()
@@ -198,7 +218,7 @@ async def chat(request: ChatRequest):
                 
                 if simple_questions:
                     session.status = "gathering_info"
-                    sessions[session_id] = session
+                    legacy_sessions[session_id] = session
                     
                     return ChatResponse(
                         response="I need some additional information to create your VM:",
@@ -218,7 +238,7 @@ async def chat(request: ChatRequest):
                     session.status = "provisioning"
                     session.taxi_payload = provision_result.get("payload_sent")
                     session.taxi_response = provision_result
-                    sessions[session_id] = session
+                    legacy_sessions[session_id] = session
                     
                     return ChatResponse(
                         response=f"✅ VM provisioning started successfully!\n\n"
@@ -373,10 +393,10 @@ async def get_session_status(session_id: str):
     """
     Get status of a provisioning session
     """
-    if session_id not in sessions:
+    if session_id not in legacy_sessions:
         raise HTTPException(status_code=404, detail="Session not found")
     
-    session = sessions[session_id]
+    session = legacy_sessions[session_id]
     
     return {
         "session_id": session_id,
@@ -393,14 +413,14 @@ async def list_sessions():
     List all active sessions (for debugging)
     """
     return {
-        "count": len(sessions),
+        "count": len(legacy_sessions),
         "sessions": [
             {
                 "session_id": sid,
                 "status": session.status,
                 "created_at": session.created_at.isoformat()
             }
-            for sid, session in sessions.items()
+            for sid, session in legacy_sessions.items()
         ]
     }
 
@@ -415,15 +435,15 @@ async def chat_stream(request: Request, message: str, session_id: Optional[str] 
     if not session_id:
         session_id = generate_session_id()
     
-    if session_id not in sessions:
-        sessions[session_id] = ChatSession(
+    if session_id not in legacy_sessions:
+        legacy_sessions[session_id] = ChatSession(
             session_id=session_id,
             created_at=datetime.now(),
             vm_request=VMRequest(),
             status="gathering_info"
         )
     
-    session = sessions[session_id]
+    session = legacy_sessions[session_id]
     
     async def event_generator():
         """Generate SSE events for the chat stream"""
@@ -566,7 +586,7 @@ async def get_session_progress(
     """
     Get recent progress events for a session (polling fallback)
     """
-    if session_id not in sessions:
+    if session_id not in legacy_sessions:
         raise HTTPException(status_code=404, detail="Session not found")
     
     since_dt = None
@@ -591,7 +611,7 @@ async def stream_session_progress(session_id: str):
     """
     SSE endpoint for streaming progress updates only
     """
-    if session_id not in sessions:
+    if session_id not in legacy_sessions:
         raise HTTPException(status_code=404, detail="Session not found")
     
     async def progress_stream():
@@ -601,12 +621,200 @@ async def stream_session_progress(session_id: str):
     
     return EventSourceResponse(progress_stream())
 
+# New Conversational Endpoints
+
+class CorrectionRequest(BaseModel):
+    """Request for field correction"""
+    session_id: str
+    field: str
+    old_value: Any
+    new_value: Any
+
+class ConfirmRequest(BaseModel):
+    """Request for confirmation before action"""
+    session_id: str
+    action: str
+    payload: Dict[str, Any]
+
+class FeedbackRequest(BaseModel):
+    """User feedback for learning"""
+    session_id: str
+    feedback_type: str  # 'positive', 'negative', 'correction'
+    details: Dict[str, Any]
+
+@app.post("/correct")
+async def correct_field(request: CorrectionRequest):
+    """Handle inline field corrections"""
+    try:
+        # Load session from Valkey
+        session = await get_session(request.session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        # Track correction
+        session.add_correction(
+            field=request.field,
+            old_value=request.old_value,
+            new_value=request.new_value,
+            corrected_by="user"
+        )
+        
+        # Update VM request if applicable
+        if session.current_vm_request and request.field in session.current_vm_request:
+            session.current_vm_request[request.field] = request.new_value
+        
+        # Save session
+        await save_session(session)
+        
+        # Let agents learn from this correction
+        if session.current_agent:
+            # This would trigger the agent's learn_from_correction method
+            logger.info(f"Agent {session.current_agent} learning from correction: {request.field}")
+        
+        return {
+            "success": True,
+            "message": f"Field '{request.field}' corrected successfully",
+            "session_id": request.session_id
+        }
+        
+    except Exception as e:
+        logger.error(f"Error handling correction: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/confirm")
+async def confirm_submission(request: ConfirmRequest):
+    """Confirm before final submission"""
+    try:
+        # Load session from Valkey
+        session = await get_session(request.session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        # Update state to confirming
+        session.update_state(ConversationState.CONFIRMING)
+        session.add_message(
+            role="user",
+            content=f"Confirmed action: {request.action}",
+            metadata={"payload": request.payload}
+        )
+        
+        # Save session
+        await save_session(session)
+        
+        # Process the confirmed action
+        if request.action == "provision_vm":
+            session.update_state(ConversationState.PROCESSING)
+            await save_session(session)
+            
+            # Trigger provisioning with the confirmed payload
+            gce_agent = GCESpecialistAgent()
+            vm_request = VMRequest(**request.payload)
+            provision_result = await gce_agent.create_instance(vm_request)
+            
+            session.final_payload = request.payload
+            session.provision_result = provision_result
+            session.update_state(
+                ConversationState.COMPLETED if provision_result["success"] 
+                else ConversationState.ERROR
+            )
+            await save_session(session)
+            
+            return {
+                "success": provision_result["success"],
+                "message": provision_result.get("message", "Action completed"),
+                "result": provision_result,
+                "session_id": request.session_id
+            }
+        
+        return {
+            "success": True,
+            "message": f"Action '{request.action}' confirmed",
+            "session_id": request.session_id
+        }
+        
+    except Exception as e:
+        logger.error(f"Error handling confirmation: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/learn")
+async def learn_from_feedback(request: FeedbackRequest):
+    """Learn from user feedback"""
+    try:
+        # Load session from Valkey
+        session = await get_session(request.session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        # Store feedback in session
+        session.metadata["feedback"] = session.metadata.get("feedback", [])
+        session.metadata["feedback"].append({
+            "type": request.feedback_type,
+            "details": request.details,
+            "timestamp": datetime.now().isoformat()
+        })
+        
+        # If positive feedback, save patterns for future use
+        if request.feedback_type == "positive" and session.current_agent:
+            # Save successful patterns to Valkey for cross-session learning
+            await valkey_manager.save_learned_pattern(
+                agent_name=session.current_agent,
+                pattern_type="successful_interaction",
+                pattern_data={
+                    "context": session.get_recent_context(5),
+                    "outcome": request.details
+                },
+                confidence=0.9
+            )
+        
+        # Save session
+        await save_session(session)
+        
+        return {
+            "success": True,
+            "message": "Thank you for your feedback. I'll use this to improve!",
+            "session_id": request.session_id
+        }
+        
+    except Exception as e:
+        logger.error(f"Error handling feedback: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/stream/{session_id}")
+async def stream_progress(session_id: str):
+    """Stream real-time progress updates via SSE"""
+    async def event_generator():
+        while True:
+            try:
+                # Get session from Valkey
+                session = await get_session(session_id)
+                if session:
+                    yield {
+                        "data": json.dumps({
+                            "state": session.state,
+                            "current_agent": session.current_agent,
+                            "progress": f"Processing with {session.current_agent or 'system'}..."
+                        })
+                    }
+                await asyncio.sleep(1)
+            except Exception as e:
+                logger.error(f"Error in SSE stream: {e}")
+                break
+    
+    return EventSourceResponse(event_generator())
+
 # Start progress manager cleanup task on startup
 @app.on_event("startup")
 async def startup_event():
     """Initialize background tasks"""
     await progress_manager.start_cleanup_task()
     logger.info("Progress manager cleanup task started")
+    
+    # Test Valkey connection
+    valkey_healthy = await valkey_manager.health_check()
+    if valkey_healthy:
+        logger.info("Valkey connection successful")
+    else:
+        logger.warning("Valkey connection failed - sessions will not persist")
 
 @app.on_event("shutdown")
 async def shutdown_event():

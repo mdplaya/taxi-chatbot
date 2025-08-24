@@ -5,7 +5,7 @@ Handles online/offline mode detection and LLM integration with fallback support.
 import os
 import time
 import asyncio
-from typing import Optional, Literal, Any, Callable
+from typing import Optional, Literal, Any, Callable, Dict
 from functools import wraps
 import logging
 
@@ -17,6 +17,15 @@ class LLMManager:
     def __init__(self):
         """Initialize the LLM Manager."""
         self.api_key = os.getenv("OPENAI_API_KEY")
+        # Model configuration for gpt-5-mini
+        self.model = os.getenv("AGENT_REASONING_MODEL", "gpt-5-mini")
+        self.temperature = float(os.getenv("REASONING_TEMPERATURE", "1.0"))  # gpt-5-mini only supports 1.0
+        
+        # Validate model constraints
+        if self.model == "gpt-5-mini" and self.temperature != 1.0:
+            logger.warning(f"Model {self.model} only supports temperature=1.0, adjusting from {self.temperature}")
+            self.temperature = 1.0
+        
         # Production timeout: 75 seconds to handle complex LLM operations
         self.timeout = int(os.getenv("LLM_TIMEOUT", "75000")) / 1000  # Convert to seconds (default: 75s)
         self.cache_ttl = int(os.getenv("LLM_CACHE_TTL", "300"))  # 5 minutes default
@@ -156,6 +165,19 @@ class LLMManager:
             return None
         
         return wrapper
+    
+    def get_model_config(self) -> Dict[str, Any]:
+        """
+        Get current model configuration
+        
+        Returns:
+            Dictionary with model name and temperature
+        """
+        return {
+            "model": self.model,
+            "temperature": self.temperature,
+            "mode": self.get_mode()
+        }
 
 
 # Global instance

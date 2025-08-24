@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 import os
 from enum import Enum
 import asyncio
+from utils.valkey_manager import valkey_manager
 
 logger = logging.getLogger(__name__)
 
@@ -391,6 +392,22 @@ class BaseAgent(ABC):
         """
         pass
     
+    async def process_with_session(self, input_data: Any, session_id: str) -> Tuple[Any, List[Thought]]:
+        """
+        Main processing loop with session awareness
+        Loads memory, processes, and saves memory
+        """
+        # Load memory for this session
+        await self.load_memory(session_id)
+        
+        # Process the input
+        result = await self.process(input_data)
+        
+        # Save updated memory
+        await self.save_memory(session_id)
+        
+        return result
+    
     async def process(self, input_data: Any) -> Tuple[Any, List[Thought]]:
         """
         Main processing loop - implements ReAct pattern
@@ -451,12 +468,113 @@ class BaseAgent(ABC):
         logger.warning(f"[{self.name}] Reached max reasoning depth without action")
         return None, self.reasoning_chain
     
-    def save_memory(self, session_id: str) -> None:
-        """Save agent memory to persistent storage"""
-        # This will be implemented with Valkey integration
-        pass
+    async def save_memory(self, session_id: str) -> None:
+        """Save agent memory to persistent storage via Valkey"""
+        try:
+            # Save short-term memory
+            if self.memory.short_term:
+                await valkey_manager.save_agent_memory(
+                    agent_name=self.name,
+                    session_id=session_id,
+                    memory_type="short_term",
+                    data={"items": self.memory.short_term},
+                    ttl=valkey_manager.short_term_ttl
+                )
+            
+            # Save long-term memory
+            if self.memory.long_term:
+                await valkey_manager.save_agent_memory(
+                    agent_name=self.name,
+                    session_id=session_id,
+                    memory_type="long_term",
+                    data=self.memory.long_term,
+                    ttl=valkey_manager.long_term_ttl
+                )
+            
+            # Save corrections
+            if self.memory.corrections:
+                await valkey_manager.save_agent_memory(
+                    agent_name=self.name,
+                    session_id=session_id,
+                    memory_type="corrections",
+                    data={"corrections": self.memory.corrections},
+                    ttl=valkey_manager.correction_ttl
+                )
+            
+            # Save learned patterns with confidence
+            if self.memory.learned_patterns:
+                for idx, pattern in enumerate(self.memory.learned_patterns):
+                    await valkey_manager.save_learned_pattern(
+                        agent_name=self.name,
+                        pattern_type="general",
+                        pattern_data=pattern,
+                        confidence=pattern.get('confidence', 0.8)
+                    )
+            
+            # Save user preferences
+            if self.memory.user_preferences:
+                await valkey_manager.save_agent_memory(
+                    agent_name=self.name,
+                    session_id=session_id,
+                    memory_type="user_preferences",
+                    data=self.memory.user_preferences,
+                    ttl=valkey_manager.long_term_ttl
+                )
+            
+            logger.info(f"{self.name}: Memory saved to Valkey for session {session_id}")
+            
+        except Exception as e:
+            logger.error(f"{self.name}: Failed to save memory: {e}")
     
-    def load_memory(self, session_id: str) -> None:
-        """Load agent memory from persistent storage"""
-        # This will be implemented with Valkey integration
-        pass
+    async def load_memory(self, session_id: str) -> None:
+        """Load agent memory from persistent storage via Valkey"""
+        try:
+            # Load short-term memory
+            short_term = await valkey_manager.load_agent_memory(
+                agent_name=self.name,
+                session_id=session_id,
+                memory_type="short_term"
+            )
+            if short_term and "items" in short_term:
+                self.memory.short_term = short_term["items"]
+            
+            # Load long-term memory
+            long_term = await valkey_manager.load_agent_memory(
+                agent_name=self.name,
+                session_id=session_id,
+                memory_type="long_term"
+            )
+            if long_term:
+                self.memory.long_term = long_term
+            
+            # Load corrections
+            corrections = await valkey_manager.load_agent_memory(
+                agent_name=self.name,
+                session_id=session_id,
+                memory_type="corrections"
+            )
+            if corrections and "corrections" in corrections:
+                self.memory.corrections = corrections["corrections"]
+            
+            # Load user preferences
+            user_prefs = await valkey_manager.load_agent_memory(
+                agent_name=self.name,
+                session_id=session_id,
+                memory_type="user_preferences"
+            )
+            if user_prefs:
+                self.memory.user_preferences = user_prefs
+            
+            # Load learned patterns
+            patterns = await valkey_manager.get_learned_patterns(
+                agent_name=self.name,
+                pattern_type="general",
+                min_confidence=0.6
+            )
+            if patterns:
+                self.memory.learned_patterns = patterns
+            
+            logger.info(f"{self.name}: Memory loaded from Valkey for session {session_id}")
+            
+        except Exception as e:
+            logger.error(f"{self.name}: Failed to load memory: {e}")

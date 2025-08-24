@@ -1,4 +1,19 @@
 services:
+  valkey:
+    image: valkey/valkey:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - valkey_data:/data
+    command: valkey-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - taxi-network
+
   mcp-server:
     build: 
       context: ./backend
@@ -15,6 +30,8 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+    networks:
+      - taxi-network
 
   api:
     build: 
@@ -24,10 +41,16 @@ services:
       - "8000:8000"
     depends_on:
       - mcp-server
+      - valkey
     environment:
       - MCP_SERVER_URL=http://mcp-server:8001
       - PYTHONUNBUFFERED=1
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - VALKEY_HOST=valkey
+      - VALKEY_PORT=6379
+      - VALKEY_AGENT_DB=1
+      - AGENT_REASONING_MODEL=gpt-5-mini
+      - REASONING_TEMPERATURE=1.0
     volumes:
       - ./backend:/app
     healthcheck:
@@ -35,6 +58,8 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+    networks:
+      - taxi-network
 
   frontend:
     build: 
@@ -49,3 +74,13 @@ services:
     volumes:
       - ./frontend:/app
       - /app/node_modules
+    networks:
+      - taxi-network
+
+networks:
+  taxi-network:
+    driver: bridge
+
+volumes:
+  valkey_data:
+    driver: local
