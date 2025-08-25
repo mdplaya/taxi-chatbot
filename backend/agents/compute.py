@@ -9,6 +9,8 @@ import logging
 import json
 from datetime import datetime
 from agents.base_agent import BaseAgent, Action
+from utils.learning import Pattern, PatternType
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +54,161 @@ class ComputeAgent(BaseAgent):
                 "parameters": ["requirements"]
             }
         ]
+    
+    async def reflect_on_extraction(self,
+                                   raw_input: str,
+                                   extracted_data: Dict,
+                                   corrections: Dict) -> Dict[str, Any]:
+        """
+        Specialized reflection for requirement extraction.
+        Analyzes extraction accuracy and learns new patterns.
+        """
+        reflection_prompt = f"""
+        Analyze this extraction:
+        
+        Raw input: {raw_input}
+        Extracted data: {json.dumps(extracted_data, default=str)}
+        Corrections made: {json.dumps(corrections, default=str)}
+        
+        Evaluate:
+        1. What was extracted correctly?
+        2. What was missed or extracted incorrectly?
+        3. What new extraction patterns should be learned?
+        4. How can extraction confidence be improved?
+        5. Any ambiguous terms that need clarification?
+        
+        Return JSON:
+        {{
+            "extraction_accuracy": {{
+                "correct_fields": [],
+                "incorrect_fields": [],
+                "missed_fields": [],
+                "accuracy_score": 0.0-1.0
+            }},
+            "new_patterns": [
+                {{
+                    "pattern": "description",
+                    "example": "input example",
+                    "extracts_to": {{"field": "value"}}
+                }}
+            ],
+            "confidence_adjustments": {{
+                "field_name": adjustment_value
+            }},
+            "ambiguous_terms": [],
+            "lessons": []
+        }}
+        """
+        
+        analysis = self._llm_reason(reflection_prompt)
+        
+        # Learn new extraction patterns
+        if analysis.get("new_patterns"):
+            for new_pattern in analysis["new_patterns"]:
+                pattern = Pattern(
+                    type=PatternType.SEQUENCE,
+                    description=f"Extraction pattern: {new_pattern['pattern']}",
+                    occurrences=1,
+                    confidence=0.7,
+                    metadata={
+                        "example": new_pattern.get("example"),
+                        "extracts_to": new_pattern.get("extracts_to")
+                    }
+                )
+                
+                if self.learning_engine:
+                    await self.share_learning(pattern, pattern.confidence)
+        
+        # Adjust field extraction confidence
+        if analysis.get("confidence_adjustments"):
+            for field, adjustment in analysis["confidence_adjustments"].items():
+                current = self.memory.long_term.get(f"extraction_confidence_{field}", 0.6)
+                new_confidence = min(1.0, max(0.3, current + adjustment))
+                self.memory.long_term[f"extraction_confidence_{field}"] = new_confidence
+        
+        return analysis
+    
+    async def learn_cloud_patterns(self,
+                                  user_input: str,
+                                  detected_cloud: str,
+                                  was_correct: bool) -> Dict[str, Any]:
+        """
+        Learn cloud provider detection patterns.
+        Builds provider-specific terminology knowledge.
+        """
+        learning_prompt = f"""
+        Learn from this cloud detection:
+        
+        User input: {user_input}
+        Detected: {detected_cloud}
+        Was correct: {was_correct}
+        
+        Identify:
+        1. Provider-specific terminology used
+        2. Key indicators for each cloud provider
+        3. Ambiguous terms that could mean multiple providers
+        4. Common user phrases for each provider
+        5. Detection confidence factors
+        
+        Return JSON:
+        {{
+            "provider_indicators": {{
+                "gcp": [],
+                "aws": [],
+                "azure": []
+            }},
+            "ambiguous_terms": [
+                {{
+                    "term": "term",
+                    "could_mean": ["provider1", "provider2"],
+                    "disambiguation": "how to clarify"
+                }}
+            ],
+            "common_phrases": {{
+                "provider": ["phrase1", "phrase2"]
+            }},
+            "confidence_factors": {{
+                "high_confidence": [],
+                "low_confidence": []
+            }}
+        }}
+        """
+        
+        analysis = self._llm_reason(learning_prompt)
+        
+        # Build cloud detection confidence model
+        if was_correct:
+            # Reinforce successful detection patterns
+            pattern = Pattern(
+                type=PatternType.SUCCESS,
+                description=f"Cloud detection: '{user_input}' -> {detected_cloud}",
+                occurrences=1,
+                confidence=0.9,
+                metadata=analysis
+            )
+        else:
+            # Learn from incorrect detection
+            pattern = Pattern(
+                type=PatternType.ERROR,
+                description=f"Incorrect cloud detection: avoid '{user_input}' -> {detected_cloud}",
+                occurrences=1,
+                confidence=0.8,
+                metadata=analysis
+            )
+        
+        if self.learning_engine:
+            await self.share_learning(pattern, pattern.confidence)
+        
+        # Store provider-specific indicators
+        for provider, indicators in analysis.get("provider_indicators", {}).items():
+            if indicators:
+                self.memory.long_term[f"cloud_indicators_{provider}"] = indicators
+        
+        # Track ambiguous cases for future clarification
+        if analysis.get("ambiguous_terms"):
+            self.memory.long_term["ambiguous_cloud_terms"] = analysis["ambiguous_terms"]
+        
+        return analysis
     
     def execute_action(self, action: Action) -> Any:
         """Execute the chosen action"""

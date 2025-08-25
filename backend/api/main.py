@@ -26,6 +26,7 @@ from models.agent_session import AgentSession, ConversationState
 from utils.llm_manager import llm_manager
 from utils.progress_manager import progress_manager
 from utils.valkey_manager import valkey_manager
+from utils.learning import LearningEngine
 
 # Load environment variables
 load_dotenv()
@@ -322,27 +323,60 @@ async def answer_clarification(request: AnswerRequest):
     """
     logger.info(f"Answer request for session {request.session_id}")
     
-    if request.session_id not in sessions:
-        raise HTTPException(status_code=404, detail="Session not found")
+    # Try to get session from Valkey first
+    session = await get_session(request.session_id)
     
-    session = sessions[request.session_id]
+    # If not in Valkey, check legacy sessions
+    if not session:
+        if request.session_id not in legacy_sessions:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        # Convert legacy session to AgentSession format
+        legacy_session = legacy_sessions[request.session_id]
+        session = AgentSession(
+            session_id=request.session_id,
+            state=ConversationState.CLARIFYING,
+            current_vm_request=legacy_session.vm_request.dict() if hasattr(legacy_session.vm_request, 'dict') else legacy_session.vm_request,
+            conversation_history=[]
+        )
+    
+    # Get the current VM request (handle both field names for compatibility)
+    current_vm = session.current_vm_request or getattr(session, 'vm_request', None)
+    if not current_vm:
+        raise HTTPException(status_code=400, detail="No VM request found in session")
+    
+    # Convert dict to VMRequest if needed
+    if isinstance(current_vm, dict):
+        vm_request_obj = VMRequest(**current_vm)
+    else:
+        vm_request_obj = current_vm
     
     # Update VM request with answers
     clarification_agent = ClarificationAgent()
-    session.vm_request = await clarification_agent.process_answers(
-        session.vm_request,
+    updated_vm_request = await clarification_agent.process_answers(
+        vm_request_obj,
         request.answers
     )
+    
+    # Update session with new VM request
+    session.current_vm_request = updated_vm_request.dict() if hasattr(updated_vm_request, 'dict') else updated_vm_request
+    
+    # Save the updated session
+    await save_session(session)
+    
+    # Update legacy session if it exists
+    if request.session_id in legacy_sessions:
+        legacy_sessions[request.session_id].vm_request = updated_vm_request
     
     # Get current mode
     current_mode = llm_manager.get_mode()
     
     # Check if we have all required fields now
     clarification_result = await clarification_agent.get_clarifications(
-        session.vm_request,
+        updated_vm_request,
         {
-            'raw_request': session.messages[0] if session.messages else '',
-            'conversation_history': session.messages if hasattr(session, 'messages') else [],
+            'raw_request': session.conversation_history[0].content if session.conversation_history else '',
+            'conversation_history': [msg.dict() for msg in session.conversation_history] if hasattr(session, 'conversation_history') else [],
             'session_id': request.session_id,
             'context_type': 'answer_followup'
         }
@@ -351,13 +385,29 @@ async def answer_clarification(request: AnswerRequest):
     if clarification_result["complete"]:
         # Ready to provision
         gce_agent = GCESpecialistAgent()
-        provision_result = await gce_agent.create_instance(session.vm_request)
+        provision_result = await gce_agent.create_instance(updated_vm_request)
         
         if provision_result["success"]:
-            session.status = "provisioning"
-            session.taxi_payload = provision_result.get("payload_sent")
-            session.taxi_response = provision_result
-            sessions[request.session_id] = session
+            # Update AgentSession state
+            session.state = ConversationState.PROCESSING
+            
+            # Store provision details in user preferences or metadata
+            if not session.user_preferences:
+                session.user_preferences = {}
+            session.user_preferences["last_provision"] = {
+                "taxi_payload": provision_result.get("payload_sent"),
+                "taxi_response": provision_result,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            # Save session to Valkey
+            await save_session(session)
+            
+            # Also update legacy_sessions for backward compatibility
+            if request.session_id in legacy_sessions:
+                legacy_sessions[request.session_id].status = "provisioning"
+                legacy_sessions[request.session_id].taxi_payload = provision_result.get("payload_sent")
+                legacy_sessions[request.session_id].taxi_response = provision_result
             
             return ChatResponse(
                 response=f"✅ VM provisioning started!\n"
@@ -801,6 +851,171 @@ async def stream_progress(session_id: str):
                 break
     
     return EventSourceResponse(event_generator())
+
+@app.get("/patterns/{session_id}")
+async def get_learned_patterns(session_id: str):
+    """
+    Retrieve learned patterns for a session
+    """
+    try:
+        # Get session from Valkey
+        session = await get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        # Initialize learning engine
+        learning_engine = LearningEngine(valkey_manager)
+        
+        # Get patterns for each agent involved in session
+        patterns_by_agent = {}
+        for agent_name in ["orchestrator", "clarification", "compute", "gce_specialist"]:
+            patterns = await valkey_manager.get_learned_patterns(
+                agent_name=agent_name,
+                pattern_type="all",
+                min_confidence=0.6
+            )
+            if patterns:
+                patterns_by_agent[agent_name] = patterns
+        
+        # Get session-specific patterns from history
+        session_patterns = []
+        if session.conversation_history:
+            session_patterns = await learning_engine.identify_success_patterns(
+                session.conversation_history,
+                "in_progress"  # Current session outcome
+            )
+        
+        return {
+            "session_id": session_id,
+            "agent_patterns": patterns_by_agent,
+            "session_patterns": [p.dict() for p in session_patterns],
+            "pattern_count": sum(len(p) for p in patterns_by_agent.values()) + len(session_patterns)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error retrieving patterns: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/preferences/{user_id}")
+async def get_user_preferences(user_id: str):
+    """
+    Retrieve learned user preferences
+    """
+    try:
+        # Initialize learning engine
+        learning_engine = LearningEngine(valkey_manager)
+        
+        # Load user preferences from Valkey
+        pref_data = await valkey_manager.load_agent_memory(
+            agent_name=f"user_{user_id}",
+            session_id="preferences",
+            memory_type="preferences"
+        )
+        
+        if not pref_data:
+            # No stored preferences, return defaults
+            return {
+                "user_id": user_id,
+                "preferences": {},
+                "confidence_scores": {},
+                "message": "No learned preferences yet"
+            }
+        
+        return {
+            "user_id": user_id,
+            "preferences": pref_data.get("custom_preferences", {}),
+            "cloud_provider": pref_data.get("cloud_provider"),
+            "machine_types": pref_data.get("machine_types", []),
+            "operating_system": pref_data.get("operating_system"),
+            "regions": pref_data.get("regions", []),
+            "communication_style": pref_data.get("communication_style"),
+            "confidence_scores": pref_data.get("confidence_scores", {}),
+            "last_updated": pref_data.get("last_updated")
+        }
+        
+    except Exception as e:
+        logger.error(f"Error retrieving preferences: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/preferences/{user_id}/update")
+async def update_user_preferences(user_id: str, preferences: Dict[str, Any]):
+    """
+    Update user preferences manually
+    """
+    try:
+        # Initialize learning engine
+        learning_engine = LearningEngine(valkey_manager)
+        
+        # Load existing preferences
+        existing = await valkey_manager.load_agent_memory(
+            agent_name=f"user_{user_id}",
+            session_id="preferences",
+            memory_type="preferences"
+        ) or {}
+        
+        # Merge with new preferences
+        existing.update(preferences)
+        existing["last_updated"] = datetime.now().isoformat()
+        
+        # Save updated preferences
+        success = await valkey_manager.save_agent_memory(
+            agent_name=f"user_{user_id}",
+            session_id="preferences",
+            memory_type="preferences",
+            data=existing,
+            ttl=604800  # 7 days
+        )
+        
+        if success:
+            return {
+                "success": True,
+                "message": "Preferences updated successfully",
+                "preferences": existing
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Failed to save preferences")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating preferences: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/suggest-improvements/{agent_name}")
+async def get_improvement_suggestions(agent_name: str):
+    """
+    Get improvement suggestions for a specific agent
+    """
+    try:
+        # Initialize learning engine
+        learning_engine = LearningEngine(valkey_manager)
+        
+        # Get recent performance data for the agent
+        # This is simplified - in production, you'd track actual performance metrics
+        recent_performance = [
+            {"action": "route", "success": True, "latency": 1.2},
+            {"action": "extract", "success": True, "latency": 0.8},
+            {"action": "validate", "success": False, "error": "missing field"},
+        ]
+        
+        # Get improvement suggestions
+        suggestions = await learning_engine.suggest_improvements(
+            agent_name,
+            recent_performance
+        )
+        
+        return {
+            "agent": agent_name,
+            "suggestions": [s.dict() for s in suggestions],
+            "suggestion_count": len(suggestions),
+            "generated_at": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting improvement suggestions: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # Start progress manager cleanup task on startup
 @app.on_event("startup")

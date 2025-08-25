@@ -15,6 +15,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from agents.base_agent import BaseAgent, Action
 from utils.reasoning import ReasoningEngine, ReasoningContext
 from utils.error_correction import ErrorCorrectionSystem
+from utils.learning import Pattern, PatternType
 
 logger = logging.getLogger(__name__)
 
@@ -291,6 +292,116 @@ class OrchestratorAgent(BaseAgent):
             "reasoning": result.get("reasoning", ""),
             "mode": "agentic"
         }
+    
+    async def reflect_on_routing(self, 
+                                routing_decision: str,
+                                outcome: str,
+                                session_context: Dict) -> Dict[str, Any]:
+        """
+        Specialized reflection for routing decisions.
+        Analyzes if correct agent was chosen and learns routing patterns.
+        """
+        reflection_prompt = f"""
+        Analyze this routing decision:
+        
+        Decision: Routed to {routing_decision}
+        Outcome: {outcome}
+        Context: {json.dumps(session_context, default=str)}
+        
+        Previous routing patterns:
+        {json.dumps(self.memory.learned_patterns[-5:], default=str)}
+        
+        Evaluate:
+        1. Was the correct agent chosen?
+        2. Could a different agent have handled this better?
+        3. What routing patterns are emerging?
+        4. How can routing confidence thresholds be adjusted?
+        
+        Return JSON:
+        {{
+            "correct_routing": true/false,
+            "better_agent": "agent_name or null",
+            "routing_patterns": [],
+            "confidence_adjustment": {{"agent_name": adjustment}},
+            "lessons": [],
+            "user_type_pattern": "description or null"
+        }}
+        """
+        
+        analysis = self._llm_reason(reflection_prompt)
+        
+        # Learn routing patterns for specific user types
+        if analysis.get("user_type_pattern"):
+            pattern = Pattern(
+                type=PatternType.PREFERENCE,
+                description=f"User type routing: {analysis['user_type_pattern']}",
+                occurrences=1,
+                confidence=0.7,
+                metadata={"routing_decision": routing_decision, "outcome": outcome}
+            )
+            
+            if self.learning_engine:
+                await self.share_learning(pattern, pattern.confidence)
+        
+        # Adjust routing confidence thresholds
+        if analysis.get("confidence_adjustment"):
+            for agent, adjustment in analysis["confidence_adjustment"].items():
+                current = self.memory.long_term.get(f"routing_confidence_{agent}", 0.6)
+                new_confidence = min(1.0, max(0.3, current + adjustment))
+                self.memory.long_term[f"routing_confidence_{agent}"] = new_confidence
+        
+        return analysis
+    
+    async def evaluate_conversation_flow(self,
+                                        conversation_history: List[Dict]) -> Dict[str, Any]:
+        """
+        Evaluate overall conversation quality and identify improvements.
+        """
+        evaluation_prompt = f"""
+        Evaluate this conversation flow:
+        
+        History: {json.dumps(conversation_history, default=str)}
+        
+        Assess:
+        1. Conversation coherence (1-10)
+        2. Efficiency (were there unnecessary steps?)
+        3. Missed routing opportunities
+        4. User satisfaction indicators
+        5. Suggested conversation improvements
+        
+        Return JSON:
+        {{
+            "coherence_score": 1-10,
+            "efficiency_score": 1-10,
+            "unnecessary_steps": [],
+            "missed_opportunities": [],
+            "satisfaction_indicators": {{
+                "positive": [],
+                "negative": []
+            }},
+            "improvements": []
+        }}
+        """
+        
+        evaluation = self._llm_reason(evaluation_prompt)
+        
+        # Learn from conversation patterns
+        if evaluation.get("coherence_score", 0) >= 8:
+            # This was a good conversation flow - learn from it
+            flow_pattern = {
+                "type": "successful_flow",
+                "steps": len(conversation_history),
+                "coherence": evaluation["coherence_score"],
+                "efficiency": evaluation.get("efficiency_score", 0)
+            }
+            self.memory.learned_patterns.append(flow_pattern)
+        
+        # Identify improvement opportunities
+        if evaluation.get("missed_opportunities"):
+            for opportunity in evaluation["missed_opportunities"]:
+                self.memory.long_term[f"improvement_{datetime.now().timestamp()}"] = opportunity
+        
+        return evaluation
     
     def execute_action(self, action: Action) -> Any:
         """Execute routing action"""

@@ -14,6 +14,7 @@ import os
 from enum import Enum
 import asyncio
 from utils.valkey_manager import valkey_manager
+from utils.learning import LearningEngine, Pattern, AgentMemory, PatternType
 
 logger = logging.getLogger(__name__)
 
@@ -71,13 +72,38 @@ class BaseAgent(ABC):
         self.current_step = 0
         self.total_steps = 0
         
+        # Learning Engine integration
+        self.learning_engine: Optional[LearningEngine] = None
+        self._init_learning_engine()
+        
         # Initialize OpenAI client
         api_key = os.getenv("OPENAI_API_KEY")
         if api_key:
-            self.llm = OpenAI(api_key=api_key)
+            try:
+                # Try to initialize OpenAI client
+                self.llm = OpenAI(api_key=api_key)
+            except TypeError as e:
+                # Handle version compatibility issues
+                logger.warning(f"OpenAI client init error (trying fallback): {e}")
+                try:
+                    # Fallback: set env var and init without params
+                    os.environ["OPENAI_API_KEY"] = api_key
+                    self.llm = OpenAI()
+                except Exception as e2:
+                    logger.error(f"Failed to initialize OpenAI client: {e2}")
+                    self.llm = None
         else:
             logger.warning(f"[{self.name}] No OpenAI API key configured - agent will have limited capabilities")
             self.llm = None
+    
+    def _init_learning_engine(self):
+        """Initialize learning engine for advanced pattern recognition"""
+        try:
+            self.learning_engine = LearningEngine(valkey_manager)
+            logger.info(f"[{self.name}] Learning engine initialized")
+        except Exception as e:
+            logger.warning(f"[{self.name}] Could not initialize learning engine: {e}")
+            self.learning_engine = None
     
     def set_progress_callback(self, callback: Callable[[str, str, int], None]):
         """
@@ -234,16 +260,18 @@ class BaseAgent(ABC):
             logger.info(f"[{self.name}] Action confidence {action.confidence} below threshold {self.confidence_threshold}")
             return None
     
-    def reflect(self, action: Optional[Action], outcome: Any) -> Thought:
+    async def reflect(self, action: Optional[Action], outcome: Any, domain_specific_data: Dict[str, Any] = None) -> Thought:
         """
-        Reflect on action outcome and learn
-        Updates memory with lessons learned
+        Enhanced reflection with domain awareness and learning engine integration.
+        Updates memory with lessons learned and coordinates with learning engine.
         """
+        # Base reflection using LLM
         reflection_prompt = f"""
         As {self.name} agent, reflect on this:
         
         Action taken: {json.dumps(action.dict()) if action else "No action"}
         Outcome: {json.dumps(outcome) if isinstance(outcome, dict) else str(outcome)}
+        Domain context: {json.dumps(domain_specific_data) if domain_specific_data else "None"}
         
         Previous reasoning chain:
         {self._get_reasoning_chain()}
@@ -253,12 +281,14 @@ class BaseAgent(ABC):
         2. What worked well?
         3. What could be improved?
         4. What should be remembered?
+        5. Any patterns observed?
         
         Provide reflection in JSON format:
         {{
             "reflection": "Your reflection",
             "success": true/false,
             "lessons": [],
+            "patterns_observed": [],
             "memory_updates": {{}},
             "confidence_adjustment": -0.1 to 0.1
         }}
@@ -276,6 +306,22 @@ class BaseAgent(ABC):
         # Update long-term memory
         if reflection.get("memory_updates"):
             self.memory.long_term.update(reflection["memory_updates"])
+        
+        # Integrate with learning engine if available
+        if self.learning_engine and reflection.get("patterns_observed"):
+            session_history = self._get_session_history()
+            outcome_str = "success" if reflection.get("success") else "failure"
+            
+            # Identify and save patterns
+            patterns = await self.learning_engine.identify_success_patterns(
+                session_history, 
+                outcome_str
+            )
+            
+            # Save high-confidence patterns
+            for pattern in patterns:
+                if pattern.confidence >= self.learning_engine.confidence_threshold:
+                    await self.share_learning(pattern, pattern.confidence)
         
         thought = Thought(
             type=ThoughtType.REFLECTION,
@@ -328,6 +374,120 @@ class BaseAgent(ABC):
         )
         
         self.reasoning_chain.append(thought)
+    
+    async def share_learning(self, pattern: Pattern, confidence: float) -> None:
+        """
+        Share learned patterns with other agents through learning engine.
+        Publishes patterns to shared learning store.
+        """
+        if not self.learning_engine:
+            return
+        
+        try:
+            # Save pattern to shared store
+            await valkey_manager.save_learned_pattern(
+                agent_name=self.name,
+                pattern_type=pattern.type.value,
+                pattern_data={
+                    "description": pattern.description,
+                    "occurrences": pattern.occurrences,
+                    "metadata": pattern.metadata,
+                    "source_agent": self.name,
+                    "timestamp": datetime.now().isoformat()
+                },
+                confidence=confidence
+            )
+            
+            logger.info(f"[{self.name}] Shared pattern: {pattern.description} (confidence: {confidence:.2f})")
+        except Exception as e:
+            logger.error(f"[{self.name}] Error sharing pattern: {e}")
+    
+    async def apply_learned_patterns(self, context: Dict[str, Any]) -> List[Pattern]:
+        """
+        Apply previously learned patterns to current context.
+        Retrieves relevant patterns from learning engine.
+        """
+        if not self.learning_engine:
+            return []
+        
+        try:
+            # Get patterns for this agent
+            patterns = await valkey_manager.get_learned_patterns(
+                agent_name=self.name,
+                pattern_type="all",
+                min_confidence=self.learning_engine.pattern_min_confidence
+            )
+            
+            # Filter patterns relevant to current context
+            relevant_patterns = []
+            for pattern_data in patterns:
+                # Use LLM to determine relevance
+                relevance_prompt = f"""
+                Is this pattern relevant to the current context?
+                Pattern: {json.dumps(pattern_data)}
+                Context: {json.dumps(context)}
+                
+                Respond with JSON:
+                {{"relevant": true/false, "confidence": 0.0-1.0}}
+                """
+                
+                relevance = self._llm_reason(relevance_prompt)
+                if relevance.get("relevant") and relevance.get("confidence", 0) > 0.6:
+                    pattern = Pattern(
+                        type=PatternType(pattern_data.get("type", "sequence")),
+                        description=pattern_data.get("description", ""),
+                        occurrences=pattern_data.get("occurrences", 1),
+                        confidence=pattern_data.get("confidence", 0.5),
+                        metadata=pattern_data.get("metadata", {})
+                    )
+                    relevant_patterns.append(pattern)
+            
+            return relevant_patterns
+        except Exception as e:
+            logger.error(f"[{self.name}] Error applying patterns: {e}")
+            return []
+    
+    def get_agent_memory_snapshot(self) -> AgentMemory:
+        """
+        Get current agent memory snapshot for learning coordination.
+        """
+        return AgentMemory(
+            agent_name=self.name,
+            learned_patterns=self.memory.learned_patterns,
+            corrections=self.memory.corrections,
+            performance_metrics=self._calculate_performance_metrics(),
+            last_reflection=datetime.now()
+        )
+    
+    def _calculate_performance_metrics(self) -> Dict[str, Any]:
+        """
+        Calculate agent performance metrics for learning analysis.
+        """
+        successful_actions = sum(1 for a in self.action_history if a.confidence > 0.7)
+        total_actions = len(self.action_history)
+        
+        return {
+            "success_rate": successful_actions / total_actions if total_actions > 0 else 0,
+            "total_actions": total_actions,
+            "average_confidence": sum(a.confidence for a in self.action_history) / total_actions if total_actions > 0 else 0,
+            "corrections_received": len(self.memory.corrections),
+            "patterns_learned": len(self.memory.learned_patterns)
+        }
+    
+    def _get_session_history(self) -> List[Dict[str, Any]]:
+        """
+        Get session history for pattern analysis.
+        """
+        history = []
+        for action in self.action_history:
+            history.append({
+                "agent": self.name,
+                "action": action.name,
+                "parameters": action.parameters,
+                "confidence": action.confidence,
+                "timestamp": datetime.now().isoformat()
+            })
+        return history
     
     def _llm_reason(self, prompt: str) -> Dict[str, Any]:
         """

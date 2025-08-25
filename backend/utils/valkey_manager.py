@@ -25,7 +25,9 @@ class ValkeyManager:
         self.host = os.getenv('VALKEY_HOST', 'localhost')
         self.port = int(os.getenv('VALKEY_PORT', 6379))
         self.db = int(os.getenv('VALKEY_AGENT_DB', 1))
-        self.password = os.getenv('VALKEY_PASSWORD')
+        # Treat empty string as None for password
+        password_env = os.getenv('VALKEY_PASSWORD')
+        self.password = password_env if password_env and password_env.strip() else None
         self.pool_size = int(os.getenv('VALKEY_CONNECTION_POOL_SIZE', 10))
         
         # TTL configurations
@@ -39,25 +41,33 @@ class ValkeyManager:
     
     def _init_connection_pools(self):
         """Initialize sync and async connection pools"""
+        # Build connection kwargs
+        async_conn_kwargs = {
+            'host': self.host,
+            'port': self.port,
+            'db': self.db,
+            'max_connections': self.pool_size,
+            'decode_responses': True
+        }
+        
+        sync_conn_kwargs = {
+            'host': self.host,
+            'port': self.port,
+            'db': self.db,
+            'max_connections': self.pool_size,
+            'decode_responses': True
+        }
+        
+        # Only add password if it's actually set (now None if empty)
+        if self.password:
+            async_conn_kwargs['password'] = self.password
+            sync_conn_kwargs['password'] = self.password
+        
         # Async pool for agent operations
-        self.async_pool = valkey.asyncio.ConnectionPool(
-            host=self.host,
-            port=self.port,
-            db=self.db,
-            password=self.password,
-            max_connections=self.pool_size,
-            decode_responses=True
-        )
+        self.async_pool = valkey.asyncio.ConnectionPool(**async_conn_kwargs)
         
         # Sync pool for initialization and cleanup
-        self.sync_pool = valkey.ConnectionPool(
-            host=self.host,
-            port=self.port,
-            db=self.db,
-            password=self.password,
-            max_connections=self.pool_size,
-            decode_responses=True
-        )
+        self.sync_pool = valkey.ConnectionPool(**sync_conn_kwargs)
     
     async def get_async_client(self) -> AsyncValkey:
         """Get async Valkey client from pool"""

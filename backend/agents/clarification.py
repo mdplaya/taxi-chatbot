@@ -15,6 +15,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from agents.base_agent import BaseAgent, Action
 from models.taxi_models import VMRequest
 from utils.error_correction import ErrorCorrectionSystem
+from utils.learning import Pattern, PatternType
 
 logger = logging.getLogger(__name__)
 
@@ -469,6 +470,136 @@ class ClarificationAgent(BaseAgent):
             "allows_edit": result.get("allows_edit", True),
             "mode": "conversational"
         }
+    
+    async def reflect_on_clarification(self,
+                                      questions_asked: List[str],
+                                      user_responses: List[str],
+                                      final_data: Dict) -> Dict[str, Any]:
+        """
+        Specialized reflection for clarification effectiveness.
+        Analyzes question quality and learns better phrasing.
+        """
+        reflection_prompt = f"""
+        Analyze this clarification interaction:
+        
+        Questions asked: {json.dumps(questions_asked)}
+        User responses: {json.dumps(user_responses)}
+        Final extracted data: {json.dumps(final_data, default=str)}
+        
+        Evaluate:
+        1. Were the questions clear and effective?
+        2. Did users understand what was being asked?
+        3. Were there unnecessary clarifications?
+        4. What question phrasings worked best?
+        5. What patterns in user responses emerged?
+        
+        Return JSON:
+        {{
+            "question_effectiveness": {{
+                "clear_questions": [],
+                "confusing_questions": [],
+                "effectiveness_score": 1-10
+            }},
+            "better_phrasings": {{
+                "original": "suggested improvement"
+            }},
+            "unnecessary_clarifications": [],
+            "response_patterns": [],
+            "lessons": []
+        }}
+        """
+        
+        analysis = self._llm_reason(reflection_prompt)
+        
+        # Learn better question phrasings
+        if analysis.get("better_phrasings"):
+            for original, improved in analysis["better_phrasings"].items():
+                pattern = Pattern(
+                    type=PatternType.OPTIMIZATION,
+                    description=f"Question phrasing improvement: {original} -> {improved}",
+                    occurrences=1,
+                    confidence=0.7,
+                    metadata={"original": original, "improved": improved}
+                )
+                
+                if self.learning_engine:
+                    await self.share_learning(pattern, pattern.confidence)
+        
+        # Identify unnecessary clarifications to avoid in future
+        if analysis.get("unnecessary_clarifications"):
+            for unnecessary in analysis["unnecessary_clarifications"]:
+                self.memory.learned_patterns.append({
+                    "type": "avoid_clarification",
+                    "field": unnecessary,
+                    "reason": "Often not needed",
+                    "timestamp": datetime.now().isoformat()
+                })
+        
+        return analysis
+    
+    async def learn_field_patterns(self,
+                                  field_name: str,
+                                  user_inputs: List[str],
+                                  corrections: List[str]) -> Dict[str, Any]:
+        """
+        Learn common patterns for specific fields.
+        Builds field-specific confidence models.
+        """
+        learning_prompt = f"""
+        Learn patterns for field: {field_name}
+        
+        User inputs: {json.dumps(user_inputs)}
+        Corrections made: {json.dumps(corrections)}
+        
+        Identify:
+        1. Common variations in how users specify this field
+        2. Typical values or ranges
+        3. Common mistakes or typos
+        4. Validation patterns
+        5. Default preferences
+        
+        Return JSON:
+        {{
+            "field_variations": [],
+            "common_values": [],
+            "error_patterns": [],
+            "validation_rules": [],
+            "default_preference": "value or null",
+            "confidence_model": {{
+                "high_confidence_indicators": [],
+                "low_confidence_indicators": []
+            }}
+        }}
+        """
+        
+        analysis = self._llm_reason(learning_prompt)
+        
+        # Build field-specific confidence model
+        field_pattern = {
+            "field": field_name,
+            "variations": analysis.get("field_variations", []),
+            "common_values": analysis.get("common_values", []),
+            "validation": analysis.get("validation_rules", []),
+            "learned_at": datetime.now().isoformat()
+        }
+        
+        # Store in long-term memory for this field
+        self.memory.long_term[f"field_pattern_{field_name}"] = field_pattern
+        
+        # Share high-value patterns
+        if len(analysis.get("common_values", [])) >= 3:
+            pattern = Pattern(
+                type=PatternType.PREFERENCE,
+                description=f"Common values for {field_name}: {', '.join(analysis['common_values'][:3])}",
+                occurrences=len(user_inputs),
+                confidence=0.8,
+                metadata=field_pattern
+            )
+            
+            if self.learning_engine:
+                await self.share_learning(pattern, pattern.confidence)
+        
+        return analysis
     
     def execute_action(self, action: Action) -> Any:
         """Execute clarification actions"""

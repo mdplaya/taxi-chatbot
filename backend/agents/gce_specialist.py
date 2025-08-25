@@ -9,6 +9,8 @@ import logging
 import json
 from datetime import datetime
 from agents.base_agent import BaseAgent, Action
+from utils.learning import Pattern, PatternType
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +59,176 @@ class GCESpecialistAgent(BaseAgent):
                 "parameters": ["vm_request"]
             }
         ]
+    
+    async def reflect_on_provisioning(self,
+                                     requirements: Dict,
+                                     taxi_payload: Dict,
+                                     provision_result: str) -> Dict[str, Any]:
+        """
+        Specialized reflection for provisioning decisions.
+        Analyzes success patterns and learns optimal configurations.
+        """
+        reflection_prompt = f"""
+        Analyze this provisioning:
+        
+        Requirements: {json.dumps(requirements, default=str)}
+        TAXI payload: {json.dumps(taxi_payload, default=str)}
+        Result: {provision_result}
+        
+        Evaluate:
+        1. Was the configuration optimal?
+        2. What provisioning patterns led to success/failure?
+        3. Any configuration improvements for next time?
+        4. Best practices learned?
+        5. Common configuration combinations?
+        
+        Return JSON:
+        {{
+            "configuration_quality": {{
+                "optimal": true/false,
+                "improvements": [],
+                "quality_score": 0.0-1.0
+            }},
+            "success_patterns": [
+                {{
+                    "pattern": "description",
+                    "configuration": {{}},
+                    "success_rate": 0.0-1.0
+                }}
+            ],
+            "best_practices": [],
+            "common_combinations": [
+                {{
+                    "fields": [],
+                    "frequency": "how often seen"
+                }}
+            ],
+            "lessons": []
+        }}
+        """
+        
+        analysis = self._llm_reason(reflection_prompt)
+        
+        # Learn successful provisioning patterns
+        if analysis.get("success_patterns"):
+            for success_pattern in analysis["success_patterns"]:
+                if success_pattern.get("success_rate", 0) >= 0.8:
+                    pattern = Pattern(
+                        type=PatternType.SUCCESS,
+                        description=f"GCE provisioning: {success_pattern['pattern']}",
+                        occurrences=1,
+                        confidence=success_pattern["success_rate"],
+                        metadata={
+                            "configuration": success_pattern.get("configuration", {}),
+                            "provision_result": provision_result
+                        }
+                    )
+                    
+                    if self.learning_engine:
+                        await self.share_learning(pattern, pattern.confidence)
+        
+        # Store best practices
+        if analysis.get("best_practices"):
+            current_practices = self.memory.long_term.get("gce_best_practices", [])
+            current_practices.extend(analysis["best_practices"])
+            self.memory.long_term["gce_best_practices"] = current_practices[-20:]  # Keep last 20
+        
+        return analysis
+    
+    async def learn_configuration_patterns(self,
+                                          successful_configs: List[Dict],
+                                          failed_configs: List[Dict]) -> Dict[str, Any]:
+        """
+        Learn from configuration outcomes.
+        Builds configuration recommendation model.
+        """
+        learning_prompt = f"""
+        Learn from these GCE configurations:
+        
+        Successful configs: {json.dumps(successful_configs, default=str)}
+        Failed configs: {json.dumps(failed_configs, default=str)}
+        
+        Identify:
+        1. Patterns in successful configurations
+        2. Common failure points
+        3. Optimal configuration combinations
+        4. Resource sizing recommendations
+        5. Zone/region preferences
+        
+        Return JSON:
+        {{
+            "success_patterns": [
+                {{
+                    "pattern": "description",
+                    "key_factors": [],
+                    "confidence": 0.0-1.0
+                }}
+            ],
+            "failure_patterns": [
+                {{
+                    "pattern": "description",
+                    "avoid": "what to avoid",
+                    "alternative": "better option"
+                }}
+            ],
+            "optimal_combinations": [
+                {{
+                    "machine_type": "type",
+                    "os": "os",
+                    "zone": "zone",
+                    "reason": "why optimal"
+                }}
+            ],
+            "sizing_recommendations": {{
+                "use_case": {{
+                    "recommended_type": "machine_type",
+                    "min_resources": {{}}
+                }}
+            }},
+            "zone_preferences": {{
+                "zone": "preference_reason"
+            }}
+        }}
+        """
+        
+        analysis = self._llm_reason(learning_prompt)
+        
+        # Build configuration recommendation model
+        config_model = {
+            "success_patterns": analysis.get("success_patterns", []),
+            "failure_patterns": analysis.get("failure_patterns", []),
+            "optimal_combinations": analysis.get("optimal_combinations", []),
+            "learned_at": datetime.now().isoformat()
+        }
+        
+        # Store in long-term memory
+        self.memory.long_term["gce_config_model"] = config_model
+        
+        # Share high-confidence patterns
+        for pattern_data in analysis.get("success_patterns", []):
+            if pattern_data.get("confidence", 0) >= 0.8:
+                pattern = Pattern(
+                    type=PatternType.OPTIMIZATION,
+                    description=f"GCE config: {pattern_data['pattern']}",
+                    occurrences=len(successful_configs),
+                    confidence=pattern_data["confidence"],
+                    metadata=pattern_data
+                )
+                
+                if self.learning_engine:
+                    await self.share_learning(pattern, pattern.confidence)
+        
+        # Learn from failures
+        for failure in analysis.get("failure_patterns", []):
+            self.memory.corrections.append({
+                "type": "configuration_failure",
+                "pattern": failure["pattern"],
+                "avoid": failure.get("avoid"),
+                "alternative": failure.get("alternative"),
+                "timestamp": datetime.now().isoformat()
+            })
+        
+        return analysis
     
     def execute_action(self, action: Action) -> Any:
         """Execute the chosen action"""
