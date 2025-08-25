@@ -75,12 +75,14 @@ class ReasoningEngine:
         
         # Reduce iterations for simple requests
         if context.simple_request:
-            context.max_iterations = min(2, context.max_iterations)
+            # Use environment variable for simple request iterations
+            simple_iterations = int(os.getenv('REASONING_MAX_ITERATIONS_SIMPLE', '2'))
+            context.max_iterations = min(simple_iterations, context.max_iterations)
         
         # Add timeout protection with configurable values
         import asyncio
         # Use environment variables for timeouts, with sensible defaults
-        simple_timeout = float(os.getenv('REASONING_TIMEOUT_SIMPLE', '60.0'))  # 60s for simple requests
+        simple_timeout = float(os.getenv('REASONING_TIMEOUT_SIMPLE', '30.0'))  # 30s for simple requests
         complex_timeout = float(os.getenv('REASONING_TIMEOUT_COMPLEX', '120.0'))  # 120s for complex requests
         max_time = simple_timeout if context.simple_request else complex_timeout
         start_time = asyncio.get_event_loop().time()
@@ -136,24 +138,40 @@ class ReasoningEngine:
         """
         Observation phase - understand the input
         """
-        prompt = f"""
-        Goal: {context.goal}
-        
-        Observe and analyze this input:
-        {json.dumps(input_data) if isinstance(input_data, dict) else str(input_data)}
-        
-        Previous observations:
-        {self._format_history(context.history, ReasoningState.OBSERVING)}
-        
-        Provide observation in JSON:
-        {{
-            "observation": "What you observe",
-            "key_facts": [],
-            "uncertainties": [],
-            "relevant_context": {{}},
-            "confidence": 0.0-1.0
-        }}
-        """
+        # Optimize prompt for simple requests
+        if context.simple_request:
+            # Shorter, focused prompt for simple requests
+            prompt = f"""
+            Goal: {context.goal}
+            Input: {json.dumps(input_data) if isinstance(input_data, dict) else str(input_data)[:500]}
+            
+            Provide concise observation:
+            {{
+                "observation": "Key observation",
+                "key_facts": [],
+                "confidence": 0.0-1.0
+            }}
+            """
+        else:
+            # Full prompt for complex requests
+            prompt = f"""
+            Goal: {context.goal}
+            
+            Observe and analyze this input:
+            {json.dumps(input_data) if isinstance(input_data, dict) else str(input_data)}
+            
+            Previous observations:
+            {self._format_history(context.history, ReasoningState.OBSERVING)}
+            
+            Provide observation in JSON:
+            {{
+                "observation": "What you observe",
+                "key_facts": [],
+                "uncertainties": [],
+                "relevant_context": {{}},
+                "confidence": 0.0-1.0
+            }}
+            """
         
         result = await self._llm_reason(prompt)
         
@@ -169,33 +187,51 @@ class ReasoningEngine:
         """
         Thinking phase - reason about what to do
         """
-        prompt = f"""
-        Goal: {context.goal}
-        Constraints: {json.dumps(context.constraints)}
-        
-        Based on observation:
-        {observation.content}
-        {json.dumps(observation.metadata)}
-        
-        Available actions:
-        {json.dumps(context.available_actions)}
-        
-        Think step by step:
-        1. What is the current situation?
-        2. What needs to be achieved?
-        3. What are the options?
-        4. What is the best approach?
-        
-        Provide reasoning in JSON:
-        {{
-            "reasoning": "Your step-by-step thinking",
-            "proposed_action": "action_name or null",
-            "action_parameters": {{}},
-            "alternatives": [],
-            "risks": [],
-            "confidence": 0.0-1.0
-        }}
-        """
+        # Optimize thinking prompt
+        if context.simple_request:
+            # Concise prompt for simple requests
+            prompt = f"""
+            Goal: {context.goal}
+            Observation: {observation.content[:200]}
+            Actions: {json.dumps(context.available_actions[:3])}
+            
+            Determine best action:
+            {{
+                "reasoning": "Brief reasoning",
+                "proposed_action": "action_name or null",
+                "action_parameters": {{}},
+                "confidence": 0.0-1.0
+            }}
+            """
+        else:
+            # Full prompt for complex requests
+            prompt = f"""
+            Goal: {context.goal}
+            Constraints: {json.dumps(context.constraints)}
+            
+            Based on observation:
+            {observation.content}
+            {json.dumps(observation.metadata)}
+            
+            Available actions:
+            {json.dumps(context.available_actions)}
+            
+            Think step by step:
+            1. What is the current situation?
+            2. What needs to be achieved?
+            3. What are the options?
+            4. What is the best approach?
+            
+            Provide reasoning in JSON:
+            {{
+                "reasoning": "Your step-by-step thinking",
+                "proposed_action": "action_name or null",
+                "action_parameters": {{}},
+                "alternatives": [],
+                "risks": [],
+                "confidence": 0.0-1.0
+            }}
+            """
         
         result = await self._llm_reason(prompt)
         

@@ -65,6 +65,11 @@ class ErrorCorrectionSystem:
         # First, check if we've seen similar inputs before
         similar_corrections = await self._find_similar_corrections(input_data, context)
         
+        # Check if this is a VM request that should skip correction
+        is_vm_request = context.get("agent") == "orchestrator" and \
+                       isinstance(input_data, str) and \
+                       any(kw in str(input_data).lower() for kw in ['vm', 'server', 'instance', 'compute'])
+        
         detection_prompt = f"""
         Analyze this input for potential errors or improvements:
         
@@ -77,10 +82,16 @@ class ErrorCorrectionSystem:
         Learned patterns that might apply:
         {self._get_relevant_patterns(input_data, context)}
         
+        {"For VM/compute requests, apply these specific corrections:" if is_vm_request else ""}
+        {"- 'red hat 8' or 'rhel 8' → 'RHEL8'" if is_vm_request else ""}
+        {"- 'windows 2022' or 'win22' → 'Windows Server 2022'" if is_vm_request else ""}
+        {"- Region without zone (e.g., 'us-east4') → Keep as-is, specialist will clarify" if is_vm_request else ""}
+        {"- DO NOT expand simple VM requests with unnecessary fields" if is_vm_request else ""}
+        
         Detect:
         1. Potential typos or misspellings
         2. Ambiguous references
-        3. Missing information
+        3. Missing information (but don't over-expand for VM requests)
         4. Inconsistencies
         5. Common variations that need normalization
         
@@ -91,7 +102,8 @@ class ErrorCorrectionSystem:
             "suggested_correction": "corrected version or null",
             "reasoning": "explanation",
             "confidence": 0.0-1.0,
-            "requires_user_confirmation": true/false
+            "requires_user_confirmation": true/false,
+            "is_simple_request": {str(is_vm_request).lower()}
         }}
         """
         
@@ -403,6 +415,48 @@ class ErrorCorrectionSystem:
         except Exception as e:
             logger.error(f"Error correction LLM call failed: {e}")
             return {}
+    
+    async def apply_vm_corrections(self, input_text: str) -> Dict[str, Any]:
+        """
+        Apply specific corrections for VM requests
+        Focused on common VM-related typos and variations
+        """
+        vm_correction_prompt = f"""
+        Apply VM-specific corrections to this request:
+        {input_text}
+        
+        Apply ONLY these specific corrections:
+        1. OS corrections:
+           - "red hat 8", "rhel 8", "redhat8" → "RHEL8"
+           - "red hat 9", "rhel 9", "redhat9" → "RHEL9"
+           - "windows 2019", "win19", "windows server 2019" → "Windows Server 2019"
+           - "windows 2022", "win22", "windows server 2022" → "Windows Server 2022"
+        
+        2. Machine type corrections:
+           - "n1" alone → "n1-standard-1"
+           - "cheap", "cost-effective" → suggest "e2-micro" or "e2-small"
+           - "high memory" → suggest "n2-highmem" types
+        
+        3. Provider corrections:
+           - "google", "gcp" → "Google Cloud Platform"
+           - "aws", "amazon" → "Amazon Web Services"
+           - "azure", "microsoft" → "Microsoft Azure"
+        
+        DO NOT:
+        - Add fields not mentioned (no firewall, SSH, service accounts)
+        - Expand simple requests unnecessarily
+        - Change the intent of the request
+        
+        Return JSON:
+        {{
+            "corrected_text": "corrected version",
+            "corrections_made": ["list of specific corrections"],
+            "confidence": 0.0-1.0
+        }}
+        """
+        
+        result = await self._llm_reason(vm_correction_prompt)
+        return result
     
     def get_statistics(self) -> Dict[str, Any]:
         """

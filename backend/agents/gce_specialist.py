@@ -18,21 +18,33 @@ logger = logging.getLogger(__name__)
 class GCESpecialistAgent(BaseAgent):
     """
     Specialist agent for Google Cloud Platform Compute Engine instances
-    Uses LLM reasoning for validation and provisioning decisions
+    Handles field extraction, validation, and provisioning
     """
     
-    def __init__(self, mcp_client=None):
+    def __init__(self, mcp_client=None, config=None):
         super().__init__(
             name="GCESpecialistAgent",
-            goal="Validate and provision GCE instances using intelligent reasoning",
+            goal="Extract requirements and provision GCE instances",
             model="gpt-5-mini"
         )
         self.mcp = mcp_client
         self.logger = logging.getLogger(self.__class__.__name__)
+        
+        # Configuration with bypass flags
+        self.config = config or {
+            "skip_validation": os.getenv('GCE_SKIP_VALIDATION', 'true').lower() == 'true',
+            "skip_improvements": os.getenv('GCE_SKIP_IMPROVEMENTS', 'true').lower() == 'true',
+            "skip_quota_check": os.getenv('GCE_SKIP_QUOTA_CHECK', 'true').lower() == 'true'
+        }
     
     def get_available_tools(self) -> List[Dict[str, Any]]:
         """Define available tools for GCE provisioning"""
         return [
+            {
+                "name": "extract_vm_requirements",
+                "description": "Extract VM requirements from user request",
+                "parameters": ["raw_request", "context"]
+            },
             {
                 "name": "validate_configuration",
                 "description": "Validate VM configuration using intelligent reasoning",
@@ -134,6 +146,71 @@ class GCESpecialistAgent(BaseAgent):
             self.memory.long_term["gce_best_practices"] = current_practices[-20:]  # Keep last 20
         
         return analysis
+    
+    def _extract_vm_requirements(self, raw_request: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Extract VM requirements from raw request with intelligent corrections
+        Focus on TAXI required fields only
+        """
+        extraction_prompt = f"""
+        Extract GCE VM requirements from this request:
+        {raw_request}
+        
+        Context: {json.dumps(context, default=str)[:500]}
+        
+        Apply intelligent corrections:
+        - "red hat 8" or "rhel 8" → LINUX_RHEL8
+        - "red hat 9" or "rhel 9" → LINUX_RHEL9  
+        - "windows 2019" or "win19" → WINDOWS_19
+        - "windows 2022" or "win22" → WINDOWS_22
+        - "us-east" → Identify as region, needs zone clarification
+        - "cheap vm" → Suggest e2-micro or e2-small
+        - "n1" alone → n1-standard-1
+        - "e2" alone → Ask which e2 type
+        - Fix common typos and variations
+        
+        Extract ONLY these TAXI required fields:
+        - appEnvironment: NONPROD or PROD
+        - appEnvironmentSubtype: dev/qa/test/perf (if NONPROD)
+        - lineOfBusiness: RETAIL/ISTS/EDML
+        - costCenter: 5-digit code
+        - project: GCP project ID
+        - zone: Full zone (e.g., us-east4-a)
+        - os: LINUX_RHEL8/LINUX_RHEL9/WINDOWS_19/WINDOWS_22
+        - useType: app/database
+        - machineType: Valid GCP machine type
+        - id: User email
+        
+        DO NOT extract or ask about:
+        - Firewall rules
+        - SSH keys
+        - Service accounts
+        - Network configurations
+        - Disk configurations beyond basic
+        
+        Return JSON:
+        {{
+            "extracted_fields": {{
+                "appEnvironment": "value or null",
+                "appEnvironmentSubtype": "value or null",
+                "lineOfBusiness": "value or null",
+                "costCenter": "value or null",
+                "project": "value or null",
+                "zone": "value or null",
+                "os": "value or null",
+                "useType": "value or null",
+                "machineType": "value or null",
+                "id": "value or null"
+            }},
+            "corrections_applied": ["list of corrections"],
+            "missing_fields": ["list of required fields not found"],
+            "clarifications_needed": ["specific questions for missing info"],
+            "confidence": 0.0-1.0
+        }}
+        """
+        
+        result = self._llm_reason(extraction_prompt)
+        return result
     
     async def learn_configuration_patterns(self,
                                           successful_configs: List[Dict],
@@ -375,15 +452,35 @@ class GCESpecialistAgent(BaseAgent):
         
         # Extract the payload or build a default one
         if result and "payload" in result:
-            return result["payload"]
+            taxi_payload = result["payload"]
+            # Ensure required fields are present
+            taxi_payload["cloud"] = "gcp"
+            taxi_payload["resourceType"] = "compute"
+            taxi_payload["action"] = "create"
+            return taxi_payload
         else:
-            # Fallback to direct mapping
-            return {
+            # Fallback to direct mapping with safe defaults
+            self.logger.warning("[GCE] Using fallback payload building")
+            # Filter out None values and ensure all required fields
+            filtered_dict = {k: v for k, v in vm_dict.items() if v is not None}
+            taxi_payload = {
                 "cloud": "gcp",
                 "resourceType": "compute",
                 "action": "create",
-                **vm_dict
+                "appEnvironment": filtered_dict.get("appEnvironment", "NONPROD"),
+                "os": filtered_dict.get("os", "LINUX_RHEL8"),
+                "useType": filtered_dict.get("useType", "app"),
+                "machineType": filtered_dict.get("machineType", "e2-small"),
+                "zone": filtered_dict.get("zone", "us-central1-a"),
+                "lineOfBusiness": filtered_dict.get("lineOfBusiness", "RETAIL"),
+                "costCenter": str(filtered_dict.get("costCenter", "00000")),
+                "project": filtered_dict.get("project", "default-project"),
+                "id": filtered_dict.get("id", "vm-instance")
             }
+            # Add subtype if NONPROD
+            if taxi_payload["appEnvironment"] == "NONPROD":
+                taxi_payload["appEnvironmentSubtype"] = filtered_dict.get("appEnvironmentSubtype", "dev")
+            return taxi_payload
     
     def _provision_instance(self, taxi_payload: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -437,13 +534,25 @@ class GCESpecialistAgent(BaseAgent):
                 }
         else:
             # Mock response for testing
+            self.logger.info(f"[GCE] Mock provisioning with payload: {json.dumps(taxi_payload, default=str)[:200]}")
+            # Ensure we have valid values for the response
+            machine_type = taxi_payload.get('machineType', 'e2-small')
+            zone = taxi_payload.get('zone', 'us-central1-a')
+            
+            # Validate machine type format
+            if machine_type:
+                machine_type_clean = machine_type.replace('-', '').replace('_', '')
+            else:
+                machine_type_clean = 'e2small'
+            
             return {
                 "success": True,
                 "job_id": f"TAXI-MOCK-{datetime.now().strftime('%Y%m%d%H%M%S')}",
-                "instance_id": f"i-gce-{taxi_payload.get('machineType', 'unknown')}-001",
+                "instance_id": f"i-gce-{machine_type_clean}-001",
                 "status": "PROVISIONING",
-                "message": f"Creating {taxi_payload.get('machineType')} in {taxi_payload.get('zone')}",
-                "estimated_completion": "2-3 minutes"
+                "message": f"Creating {machine_type} in {zone}",
+                "estimated_completion": "2-3 minutes",
+                "payload_sent": taxi_payload  # Include payload for debugging
             }
     
     def _check_quota(self, vm_request: Dict[str, Any]) -> Dict[str, Any]:
@@ -475,49 +584,135 @@ class GCESpecialistAgent(BaseAgent):
         result = self._llm_reason(quota_prompt)
         return result
     
-    async def create_instance(self, vm_request: VMRequest) -> Dict[str, Any]:
+    async def create_instance(self, context: Dict[str, Any], config: Dict[str, Any] = None) -> Dict[str, Any]:
         """
-        Create GCE instance with full reasoning pipeline
+        Create GCE instance - now handles extraction and provisioning
+        Can bypass validation/improvements for speed
         """
-        self.logger.info("Creating GCE instance with intelligent reasoning")
+        # Use provided config or instance defaults
+        config = config or self.config
         
-        # Use the ReAct pattern for the provisioning process
-        input_data = {
-            "vm_request": vm_request.dict(exclude_none=True) if hasattr(vm_request, 'dict') else vm_request,
-            "action": "provision"
-        }
+        self.logger.info(f"[GCE] Creating instance with config: skip_validation={config.get('skip_validation')}, "
+                        f"skip_improvements={config.get('skip_improvements')}")
         
-        # Clear reasoning chain
-        self.reasoning_chain = []
-        self.total_steps = 5
-        self.current_step = 0
-        
-        # Step 1: Observe the request
-        self.current_step += 1
-        await self.emit_progress("observing", "Analyzing VM request", 20)
-        observation = self.observe(input_data)
-        
-        # Step 2: Validate configuration
-        self.current_step += 1
-        await self.emit_progress("validating", "Validating configuration", 40)
-        validation = self._validate_config_llm(input_data["vm_request"])
-        
-        if not validation.get("valid", False):
-            # Configuration has issues
-            severe_issues = [i for i in validation.get("issues", []) if i.get("severity") == "error"]
-            if severe_issues:
+        # Check if VM request is already provided (from clarification flow)
+        if "vm_request" in context and context["vm_request"]:
+            # VM request already provided from clarification flow
+            self.logger.info("[GCE] Using pre-provided VM request from clarification flow")
+            
+            from models.taxi_models import VMRequest, AppEnvironment, OS, UseType, LineOfBusiness
+            
+            # Convert dict to VMRequest if needed
+            vm_request_data = context["vm_request"]
+            if isinstance(vm_request_data, dict):
+                vm_request = VMRequest()
+                # Map fields from dict to VMRequest
+                if vm_request_data.get("appEnvironment"):
+                    vm_request.appEnvironment = AppEnvironment(vm_request_data["appEnvironment"])
+                if vm_request_data.get("appEnvironmentSubtype"):
+                    vm_request.appEnvironmentSubtype = vm_request_data["appEnvironmentSubtype"]
+                if vm_request_data.get("lineOfBusiness"):
+                    vm_request.lineOfBusiness = LineOfBusiness(vm_request_data["lineOfBusiness"])
+                if vm_request_data.get("costCenter"):
+                    vm_request.costCenter = vm_request_data["costCenter"]
+                if vm_request_data.get("project"):
+                    vm_request.project = vm_request_data["project"]
+                if vm_request_data.get("zone"):
+                    vm_request.zone = vm_request_data["zone"]
+                if vm_request_data.get("os"):
+                    vm_request.os = OS(vm_request_data["os"])
+                if vm_request_data.get("useType"):
+                    vm_request.useType = UseType(vm_request_data["useType"])
+                if vm_request_data.get("machineType"):
+                    vm_request.machineType = vm_request_data["machineType"]
+                if vm_request_data.get("id"):
+                    vm_request.id = vm_request_data["id"]
+            else:
+                vm_request = vm_request_data
+            
+            # Clear reasoning chain for provisioning
+            self.reasoning_chain = []
+            self.total_steps = 3
+            self.current_step = 0
+            
+            # Skip extraction since we already have the data
+            extraction_result = {"corrections_applied": []}
+            
+        else:
+            # Need to extract from raw request
+            raw_request = context.get("raw_request", "")
+            
+            # Clear reasoning chain
+            self.reasoning_chain = []
+            self.total_steps = 4 if config.get('skip_validation') else 6
+            self.current_step = 0
+            
+            # Step 1: Extract VM requirements with corrections
+            self.current_step += 1
+            await self.emit_progress("extracting", "Extracting VM requirements", 20)
+            
+            extraction_result = self._extract_vm_requirements(raw_request, context)
+            extracted_fields = extraction_result.get("extracted_fields", {})
+            
+            # Check if clarification needed
+            if extraction_result.get("clarifications_needed"):
                 return {
                     "success": False,
-                    "error": "Configuration validation failed",
-                    "issues": severe_issues,
                     "needs_clarification": True,
-                    "reasoning_chain": [t.dict() for t in self.reasoning_chain]
+                    "questions": extraction_result["clarifications_needed"],
+                    "partial_data": extracted_fields,
+                    "corrections_applied": extraction_result.get("corrections_applied", [])
                 }
+            
+            # Build VMRequest from extracted fields
+            from models.taxi_models import VMRequest, AppEnvironment, OS, UseType, LineOfBusiness
+            vm_request = VMRequest()
+            
+            # Map extracted fields to VMRequest
+            if extracted_fields.get("appEnvironment"):
+                vm_request.appEnvironment = AppEnvironment(extracted_fields["appEnvironment"])
+            if extracted_fields.get("appEnvironmentSubtype"):
+                vm_request.appEnvironmentSubtype = extracted_fields["appEnvironmentSubtype"]
+            if extracted_fields.get("lineOfBusiness"):
+                vm_request.lineOfBusiness = LineOfBusiness(extracted_fields["lineOfBusiness"])
+            if extracted_fields.get("costCenter"):
+                vm_request.costCenter = extracted_fields["costCenter"]
+            if extracted_fields.get("project"):
+                vm_request.project = extracted_fields["project"]
+            if extracted_fields.get("zone"):
+                vm_request.zone = extracted_fields["zone"]
+            if extracted_fields.get("os"):
+                vm_request.os = OS(extracted_fields["os"])
+            if extracted_fields.get("useType"):
+                vm_request.useType = UseType(extracted_fields["useType"])
+            if extracted_fields.get("machineType"):
+                vm_request.machineType = extracted_fields["machineType"]
+            if extracted_fields.get("id"):
+                vm_request.id = extracted_fields["id"]
         
-        # Step 3: Suggest improvements
-        self.current_step += 1
-        await self.emit_progress("optimizing", "Optimizing configuration", 50)
-        improvements = self._suggest_improvements(input_data["vm_request"])
+        # Step 2: Validate configuration (if not skipped)
+        validation = {"valid": True, "issues": []}
+        if not config.get("skip_validation"):
+            self.current_step += 1
+            await self.emit_progress("validating", "Validating configuration", 40)
+            validation = self._validate_config_llm(vm_request.dict(exclude_none=True))
+            
+            if not validation.get("valid", False):
+                severe_issues = [i for i in validation.get("issues", []) if i.get("severity") == "error"]
+                if severe_issues:
+                    return {
+                        "success": False,
+                        "error": "Configuration validation failed",
+                        "issues": severe_issues,
+                        "needs_clarification": True
+                    }
+        
+        # Step 3: Suggest improvements (if not skipped)
+        improvements = {"improvements": []}
+        if not config.get("skip_improvements"):
+            self.current_step += 1
+            await self.emit_progress("optimizing", "Optimizing configuration", 50)
+            improvements = self._suggest_improvements(vm_request.dict(exclude_none=True))
         
         # Step 4: Build TAXI payload
         self.current_step += 1
@@ -529,24 +724,14 @@ class GCESpecialistAgent(BaseAgent):
         await self.emit_progress("provisioning", "Provisioning instance", 90)
         result = self._provision_instance(taxi_payload)
         
-        # Reflect on the outcome
-        reflection = self.reflect(None, result)
-        
-        # Store in memory
-        self.memory.short_term.append({
-            "request": input_data["vm_request"],
-            "result": result,
-            "timestamp": datetime.now().isoformat()
-        })
-        
         await self.emit_progress("complete", "Instance provisioning complete", 100)
         
         return {
             **result,
-            "validation": validation,
+            "validation": validation if not config.get('skip_validation') else {"skipped": True},
             "improvements_suggested": improvements.get("improvements", []),
             "payload_sent": taxi_payload,
-            "reasoning_chain": [t.dict() for t in self.reasoning_chain]
+            "corrections_applied": extraction_result.get("corrections_applied", [])
         }
     
     async def validate_config(self, vm_request: VMRequest) -> Dict[str, Any]:

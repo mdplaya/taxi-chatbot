@@ -28,8 +28,10 @@ from utils.progress_manager import progress_manager
 from utils.valkey_manager import valkey_manager
 from utils.learning import LearningEngine
 
-# Load environment variables
-load_dotenv()
+# Load environment variables - find .env file in backend directory
+from pathlib import Path
+env_path = Path(__file__).parent.parent / '.env'
+load_dotenv(dotenv_path=env_path)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -175,65 +177,60 @@ async def chat(request: ChatRequest):
         
         # Handle routing based on next agent
         if orchestrator_result.get("next_agent") == "compute":
-            # Process through compute agent
+            # Process through compute agent (now just routing)
             compute_agent = ComputeAgent()
             compute_result = await compute_agent.process(orchestrator_result["context"])
             
-            # Check compute result is valid
-            if not isinstance(compute_result, dict):
-                logger.error(f"Invalid compute result type: {type(compute_result)}, value: {compute_result}")
-                compute_result = {"needs_clarification": True, "vm_request": {}}
+            # Compute agent now returns next_agent (specialist)
+            specialist_name = compute_result.get("next_agent")
             
-            # Update session with extracted requirements
-            if "vm_request" in compute_result:
-                vm_request_dict = compute_result["vm_request"].dict() if hasattr(compute_result["vm_request"], 'dict') else compute_result["vm_request"]
-                for key, value in vm_request_dict.items():
-                    if value is not None:
-                        setattr(session.vm_request, key, value)
-            
-            # Check if clarification needed
-            if compute_result.get("needs_clarification"):
-                # For now, return a simple clarification response without LLM
-                missing = compute_result.get("missing_fields", [])
+            if specialist_name == "gce_specialist":
+                # Route to GCE specialist with full context
+                gce_agent = GCESpecialistAgent()
+                provision_result = await gce_agent.create_instance(
+                    compute_result.get("context", orchestrator_result["context"])
+                )
                 
-                # Create simple questions for missing fields
-                simple_questions = []
-                field_prompts = {
-                    "appEnvironment": "What environment is this for? (PROD or NONPROD)",
-                    "lineOfBusiness": "Which line of business? (RETAIL, ISTS, or EDML)",
-                    "costCenter": "What's the 5-digit cost center code?",
-                    "project": "What's your GCP project ID?",
-                    "zone": "Which GCP zone? (e.g., us-central1-a)",
-                    "os": "Which OS? (LINUX_RHEL8, LINUX_RHEL9, WINDOWS_19, or WINDOWS_22)",
-                    "useType": "What's the use type? (app or database)",
-                    "machineType": "What machine type? (e.g., e2-small, n1-standard-1)",
-                    "id": "What should we name this VM?"
-                }
-                
-                for field in missing[:3]:  # Ask for 3 fields at a time
-                    simple_questions.append({
-                        "field": field,
-                        "question": field_prompts.get(field, f"What's the {field}?"),
-                        "description": ""
-                    })
-                
-                if simple_questions:
+                # Check if clarification needed from GCE specialist
+                if provision_result.get("needs_clarification"):
+                    questions = provision_result.get("questions", [])
+                    
+                    # Store partial data in session if available
+                    if provision_result.get("partial_data"):
+                        partial_data = provision_result["partial_data"]
+                        for key, value in partial_data.items():
+                            if value is not None and hasattr(session.vm_request, key):
+                                setattr(session.vm_request, key, value)
+                    
                     session.status = "gathering_info"
                     legacy_sessions[session_id] = session
                     
+                    # Format questions for client
+                    formatted_questions = []
+                    for q in questions[:3]:  # Ask up to 3 questions at a time
+                        if isinstance(q, str):
+                            # Simple string question
+                            field = q.split(" ")[0].lower()  # Try to extract field name
+                            formatted_questions.append({
+                                "field": field,
+                                "question": q,
+                                "description": ""
+                            })
+                        elif isinstance(q, dict):
+                            formatted_questions.append(q)
+                    
+                    corrections_msg = ""
+                    if provision_result.get("corrections_applied"):
+                        corrections_msg = f"\n\n*Corrections applied: {', '.join(provision_result['corrections_applied'])}*"
+                    
                     return ChatResponse(
-                        response="I need some additional information to create your VM:",
+                        response=f"I need some additional information to create your VM:{corrections_msg}",
                         needs_clarification=True,
-                        questions=simple_questions,
+                        questions=formatted_questions,
                         session_id=session_id,
                         status=session.status,
                         mode=current_mode
                     )
-            
-            # Ready to provision
-            if compute_result.get("provider") == "gcp":
-                gce_agent = GCESpecialistAgent()
-                provision_result = await gce_agent.create_instance(session.vm_request)
                 
                 if provision_result["success"]:
                     session.status = "provisioning"
@@ -283,6 +280,26 @@ async def chat(request: ChatRequest):
                         status="failed",
                         mode=current_mode
                     )
+            
+            elif specialist_name == "clarification":
+                # Need more info to determine specialist
+                return ChatResponse(
+                    response="I need more information about your compute request. Are you looking to create a VM in GCP, AWS, or Azure?",
+                    needs_clarification=False,
+                    session_id=session_id,
+                    status="gathering_info",
+                    mode=current_mode
+                )
+            
+            else:
+                # Other specialists not implemented yet
+                return ChatResponse(
+                    response=f"The {specialist_name} specialist is not yet implemented. Currently, I can only help with GCP VMs.",
+                    needs_clarification=False,
+                    session_id=session_id,
+                    status="gathering_info",
+                    mode=current_mode
+                )
         
         elif orchestrator_result["next_agent"] == "clarification":
             # Need initial clarification
@@ -335,7 +352,7 @@ async def answer_clarification(request: AnswerRequest):
         legacy_session = legacy_sessions[request.session_id]
         session = AgentSession(
             session_id=request.session_id,
-            state=ConversationState.CLARIFYING,
+            state=ConversationState.GATHERING_INFO,  # Use GATHERING_INFO instead of CLARIFYING
             current_vm_request=legacy_session.vm_request.dict() if hasattr(legacy_session.vm_request, 'dict') else legacy_session.vm_request,
             conversation_history=[]
         )
@@ -383,9 +400,15 @@ async def answer_clarification(request: AnswerRequest):
     )
     
     if clarification_result["complete"]:
-        # Ready to provision
+        # Ready to provision - create context for GCE specialist
         gce_agent = GCESpecialistAgent()
-        provision_result = await gce_agent.create_instance(updated_vm_request)
+        # Build context from session and VM request
+        context = {
+            "raw_request": session.conversation_history[0].content if session.conversation_history else "",
+            "session_id": request.session_id,
+            "vm_request": updated_vm_request.dict() if hasattr(updated_vm_request, 'dict') else updated_vm_request
+        }
+        provision_result = await gce_agent.create_instance(context)
         
         if provision_result["success"]:
             # Update AgentSession state
@@ -416,7 +439,7 @@ async def answer_clarification(request: AnswerRequest):
                 needs_clarification=False,
                 session_id=request.session_id,
                 final_payload=provision_result.get("payload_sent"),
-                status=session.status,
+                status="provisioning",
                 mode=current_mode
             )
         else:
@@ -759,7 +782,13 @@ async def confirm_submission(request: ConfirmRequest):
             # Trigger provisioning with the confirmed payload
             gce_agent = GCESpecialistAgent()
             vm_request = VMRequest(**request.payload)
-            provision_result = await gce_agent.create_instance(vm_request)
+            # Create context for new GCE specialist signature
+            context = {
+                "raw_request": f"Provision VM with confirmed payload",
+                "session_id": request.session_id,
+                "vm_request": vm_request.dict() if hasattr(vm_request, 'dict') else vm_request
+            }
+            provision_result = await gce_agent.create_instance(context)
             
             session.final_payload = request.payload
             session.provision_result = provision_result

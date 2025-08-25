@@ -114,10 +114,21 @@ class OrchestratorAgent(BaseAgent):
         processed_input = user_input
         skip_correction = False
         
-        # Check if request is simple and clear
-        if isinstance(user_input, str) and len(user_input) < 50 and any(keyword in user_input.lower() for keyword in ['vm', 'virtual machine', 'instance', 'server']):
-            skip_correction = True
-            logger.info(f"[Orchestrator] Skipping error correction for simple request: {user_input}")
+        # Check if request is simple and clear - expanded conditions
+        if isinstance(user_input, str):
+            user_lower = user_input.lower()
+            # Skip correction for short, clear VM requests
+            vm_keywords = ['vm', 'virtual machine', 'instance', 'server', 'compute', 'linux', 'windows', 'rhel', 'gcp', 'gce']
+            database_keywords = ['database', 'db', 'sql', 'mysql', 'postgres']
+            
+            # Skip if: short request with clear keywords OR very specific technical request
+            is_short_clear = len(user_input) < 100 and any(keyword in user_lower for keyword in vm_keywords)
+            is_specific_technical = any(keyword in user_lower for keyword in ['create', 'deploy', 'provision', 'launch']) and \
+                                  any(keyword in user_lower for keyword in vm_keywords + database_keywords)
+            
+            if is_short_clear or is_specific_technical:
+                skip_correction = True
+                logger.info(f"[Orchestrator] Skipping error correction for simple/clear request: {user_input[:50]}...")
         
         if not skip_correction:
             # Apply error correction only for complex/unclear requests
@@ -141,7 +152,7 @@ class OrchestratorAgent(BaseAgent):
         if self.progress_callback:
             await self.emit_progress("detecting_intent", "Determining request intent...", 30)
         
-        # Create reasoning context
+        # Create reasoning context with optimized settings
         is_simple = skip_correction  # Simple requests that skipped correction
         context = ReasoningContext(
             goal="Understand user intent and route to appropriate agent",
@@ -230,37 +241,51 @@ class OrchestratorAgent(BaseAgent):
     async def _direct_reasoning(self, user_input: str, session_id: str) -> Dict[str, Any]:
         """
         Direct LLM reasoning for routing decision
-        Fallback when reasoning engine doesn't produce result
+        Simplified prompt focusing on resource type detection only
         """
-        routing_prompt = f"""
-        As an intelligent orchestrator, analyze this request and decide routing:
+        # Check if this is a simple request
+        is_simple = len(user_input) < 100 and any(kw in user_input.lower() for kw in ['vm', 'server', 'instance', 'compute'])
         
-        User input: {user_input}
-        Session ID: {session_id}
-        Conversation history: {json.dumps(self._get_conversation_history(session_id))}
-        
-        Available agents:
-        {json.dumps(self.available_agents)}
-        
-        Analyze:
-        1. What is the user trying to accomplish?
-        2. What type of resource do they want?
-        3. Which cloud provider (if any) are they targeting?
-        4. What information is present vs missing?
-        5. Which agent is best suited to handle this?
-        
-        Respond in JSON:
-        {{
-            "intent": "description of user intent",
-            "resource_type": "vm|database|network|storage|other",
-            "provider": "gcp|aws|azure|onprem|unclear",
-            "confidence": 0.0-1.0,
-            "next_agent": "agent_name",
-            "missing_info": [],
-            "extracted_requirements": {{}},
-            "reasoning": "explanation of routing decision"
-        }}
-        """
+        if is_simple:
+            # Simplified prompt for simple requests
+            routing_prompt = f"""
+            Route this request to the correct agent:
+            User: {user_input}
+            
+            Available agents: {list(self.available_agents.keys())}
+            
+            Detect resource type and return JSON:
+            {{
+                "resource_type": "vm|database|network|storage|other",
+                "next_agent": "agent_name",
+                "confidence": 0.0-1.0
+            }}
+            """
+        else:
+            # Full prompt for complex requests
+            routing_prompt = f"""
+            As an intelligent orchestrator, analyze this request and decide routing:
+            
+            User input: {user_input}
+            Conversation history: {json.dumps(self._get_conversation_history(session_id)[-2:])}
+            
+            Available agents:
+            {json.dumps(self.available_agents)}
+            
+            Focus on:
+            1. Resource type (vm, database, network, storage)
+            2. Which agent handles this type
+            
+            Respond in JSON:
+            {{
+                "intent": "brief description",
+                "resource_type": "vm|database|network|storage|other",
+                "provider": "gcp|aws|azure|unclear",
+                "confidence": 0.0-1.0,
+                "next_agent": "agent_name",
+                "reasoning": "brief explanation"
+            }}
+            """
         
         result = self._llm_reason(routing_prompt)
         
