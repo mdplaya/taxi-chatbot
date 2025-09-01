@@ -253,6 +253,38 @@ class GCESpecialistAgent(BaseAgent):
         """
         
         result = self._llm_reason(extraction_prompt)
+        
+        # Merge context's extracted_requirements into the extracted_fields
+        if extracted_requirements:
+            if not result.get("extracted_fields"):
+                result["extracted_fields"] = {}
+            
+            # Use context values for any fields that are provided
+            for key, value in extracted_requirements.items():
+                if value is not None and key in ["environment", "appEnvironmentSubtype", "os", "provider", "use_type"]:
+                    # Map the field names appropriately
+                    if key == "environment":
+                        result["extracted_fields"]["appEnvironment"] = value
+                    elif key == "use_type":
+                        result["extracted_fields"]["useType"] = value
+                    else:
+                        result["extracted_fields"][key] = value
+                        
+            # Remove questions for fields we already have from context
+            if result.get("clarifications_needed"):
+                filtered_questions = []
+                for question in result["clarifications_needed"]:
+                    # Check if this question is about a field we already have
+                    if isinstance(question, dict):
+                        field = question.get("field", "")
+                        if field not in ["appEnvironment", "appEnvironmentSubtype"] or not result["extracted_fields"].get(field):
+                            filtered_questions.append(question)
+                    elif isinstance(question, str):
+                        # Simple string questions - check if it's asking about environment
+                        if "environment" not in question.lower() and "prod" not in question.lower():
+                            filtered_questions.append(question)
+                result["clarifications_needed"] = filtered_questions
+        
         return result
     
     async def learn_configuration_patterns(self,

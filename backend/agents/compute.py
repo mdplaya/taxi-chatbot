@@ -285,6 +285,9 @@ class ComputeAgent(BaseAgent):
         {chr(10).join(specialist_info)}
         
         Apply intelligent routing:
+        - First check context: if context contains provider='gcp' → route to gce_specialist
+        - If context contains provider='aws' → route to ec2_specialist
+        - If context contains provider='azure' → route to azure_vm_specialist
         - If user mentions AWS/EC2/Amazon → route to ec2_specialist
         - If user mentions Azure/Microsoft → route to azure_vm_specialist  
         - If user mentions GCP/Google/GCE → route to gce_specialist
