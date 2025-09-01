@@ -302,7 +302,100 @@ async def chat(request: ChatRequest):
                 )
         
         elif orchestrator_result["next_agent"] == "clarification":
-            # Need initial clarification
+            # Log why clarification was chosen
+            logger.warning(f"[API] Orchestrator chose clarification for: {message}")
+            logger.warning(f"[API] Orchestrator reasoning: {orchestrator_result.get('reasoning', 'No reasoning provided')}")
+            logger.warning(f"[API] Orchestrator context: {orchestrator_result.get('context', {})}")
+            
+            # Attempt to extract partial VM info anyway
+            vm_keywords = ['vm', 'vms', 'virtual machine', 'instance', 'server', 'compute', 'machine']
+            if any(kw in message.lower() for kw in vm_keywords):
+                logger.info("[API] Detected VM keywords despite clarification routing - attempting compute agent fallback")
+                
+                # Force route to compute agent
+                compute_agent = ComputeAgent()
+                compute_context = {
+                    "provider": "gcp",  # Default to GCP
+                    "raw_request": message,
+                    "session_id": session_id,
+                    "conversation_history": []
+                }
+                
+                try:
+                    compute_result = await compute_agent.process(compute_context)
+                    logger.info(f"[API] Compute agent extracted: {compute_result}")
+                    
+                    # Create or get session
+                    if session_id not in legacy_sessions:
+                        legacy_sessions[session_id] = ChatSession(
+                            session_id=session_id,
+                            created_at=datetime.now(),
+                            vm_request=VMRequest(),
+                            status="gathering_info"
+                        )
+                    
+                    session = legacy_sessions[session_id]
+                    
+                    # Update session with extracted requirements
+                    for key, value in compute_result.items():
+                        if hasattr(session.vm_request, key) and value is not None:
+                            setattr(session.vm_request, key, value)
+                    
+                    # Check for missing fields and generate clarifications
+                    missing = session.vm_request.get_missing_fields()
+                    
+                    if missing:
+                        clarification_agent = ClarificationAgent()
+                        questions = await clarification_agent.generate_questions(
+                            session.vm_request, missing
+                        )
+                        
+                        return ChatResponse(
+                            response="I detected you want to create a VM. I need some additional information:",
+                            needs_clarification=True,
+                            questions=questions,
+                            session_id=session_id,
+                            status="gathering_info",
+                            mode=current_mode
+                        )
+                    else:
+                        # All info available, proceed to provision
+                        gce_agent = GCESpecialistAgent()
+                        context = {
+                            "raw_request": message,
+                            "session_id": session_id,
+                            "vm_request": session.vm_request.dict() if hasattr(session.vm_request, 'dict') else session.vm_request
+                        }
+                        provision_result = await gce_agent.create_instance(context)
+                        
+                        if provision_result["success"]:
+                            session.status = "provisioning"
+                            session.taxi_payload = provision_result.get("payload_sent")
+                            session.taxi_response = provision_result
+                            
+                            return ChatResponse(
+                                response=f"✅ VM provisioning started!\n"
+                                        f"Job ID: {provision_result['job_id']}\n"
+                                        f"Instance ID: {provision_result['instance_id']}",
+                                needs_clarification=False,
+                                session_id=session_id,
+                                final_payload=provision_result.get("payload_sent"),
+                                status="provisioning",
+                                mode=current_mode
+                            )
+                        else:
+                            return ChatResponse(
+                                response=f"Error: {provision_result.get('error', 'Unknown error')}",
+                                needs_clarification=False,
+                                session_id=session_id,
+                                status="failed",
+                                mode=current_mode
+                            )
+                except Exception as e:
+                    logger.error(f"[API] Fallback compute agent failed: {e}")
+                    # Fall through to original error message
+            
+            # Original fallback if no VM keywords or fallback failed
             return ChatResponse(
                 response="I'm not sure what you'd like to do. Could you please provide more details about the resource you want to create?",
                 needs_clarification=False,

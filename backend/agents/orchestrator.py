@@ -117,13 +117,19 @@ class OrchestratorAgent(BaseAgent):
         # Check if request is simple and clear - expanded conditions
         if isinstance(user_input, str):
             user_lower = user_input.lower()
-            # Skip correction for short, clear VM requests
-            vm_keywords = ['vm', 'virtual machine', 'instance', 'server', 'compute', 'linux', 'windows', 'rhel', 'gcp', 'gce']
-            database_keywords = ['database', 'db', 'sql', 'mysql', 'postgres']
+            # Expanded VM keywords to catch more variations
+            vm_keywords = ['vm', 'vms', 'virtual machine', 'virtual-machine', 
+                          'instance', 'instances', 'server', 'servers', 
+                          'compute', 'machine', 'box', 'node', 'linux', 
+                          'windows', 'rhel', 'gcp', 'gce']
+            database_keywords = ['database', 'db', 'sql', 'mysql', 'postgres', 
+                               'rds', 'cloudsql', 'datastore']
             
             # Skip if: short request with clear keywords OR very specific technical request
             is_short_clear = len(user_input) < 100 and any(keyword in user_lower for keyword in vm_keywords)
-            is_specific_technical = any(keyword in user_lower for keyword in ['create', 'deploy', 'provision', 'launch']) and \
+            # Expanded action keywords for better detection
+            action_keywords = ['create', 'deploy', 'provision', 'launch', 'spin up', 'need', 'want', 'set up']
+            is_specific_technical = any(keyword in user_lower for keyword in action_keywords) and \
                                   any(keyword in user_lower for keyword in vm_keywords + database_keywords)
             
             if is_short_clear or is_specific_technical:
@@ -175,18 +181,92 @@ class OrchestratorAgent(BaseAgent):
             logger.info(f"[Orchestrator] Using cached routing decision for: {processed_input[:50]}")
             return cached_result
         
-        # For simple requests, use a fast path
-        if is_simple and "vm" in processed_input.lower():
-            logger.info(f"[Orchestrator] Using fast path for simple VM request")
+        # Enhanced fast path with better keyword detection
+        user_lower = processed_input.lower()
+        
+        # Comprehensive VM request detection
+        vm_keywords = ['vm', 'vms', 'virtual machine', 'virtual-machine',
+                      'instance', 'instances', 'server', 'servers',
+                      'compute', 'machine', 'box', 'node']
+        action_keywords = ['create', 'deploy', 'provision', 'launch', 'spin up', 'need', 'want', 'set up']
+        
+        is_vm_request = any(keyword in user_lower for keyword in vm_keywords)
+        is_compute_action = any(action in user_lower for action in action_keywords) and \
+                          any(kw in user_lower for kw in ['server', 'instance', 'machine', 'compute'])
+        
+        # Use fast path for VM requests
+        if is_simple and (is_vm_request or is_compute_action):
+            logger.info(f"[Orchestrator] Using fast path for VM request: {processed_input[:50]}")
             
-            # Extract basic requirements from the simple request
+            # Enhanced provider detection
+            provider_patterns = {
+                'gcp': ['gcp', 'google', 'gce', 'google cloud'],
+                'aws': ['aws', 'amazon', 'ec2', 'amazon web services'],
+                'azure': ['azure', 'microsoft', 'windows azure'],
+                'onprem': ['on-prem', 'on prem', 'onprem', 'datacenter', 'vmware']
+            }
+            
+            # Enhanced OS detection
+            os_patterns = {
+                'windows': ['windows', 'win', 'w2k', 'win2022', 'win2019'],
+                'linux': ['linux', 'ubuntu', 'centos', 'debian', 'fedora'],
+                'rhel': ['rhel', 'redhat', 'red hat', 'red-hat']
+            }
+            
+            # Extract all possible requirements
             extracted = {}
-            if "gcp" in processed_input.lower() or "google" in processed_input.lower():
-                extracted["provider"] = "gcp"
-            if "prod" in processed_input.lower():
+            
+            # Detect provider
+            for provider, patterns in provider_patterns.items():
+                if any(pattern in user_lower for pattern in patterns):
+                    extracted["provider"] = provider
+                    break
+            else:
+                extracted["provider"] = "gcp"  # Default to GCP
+            
+            # Detect OS
+            for os_type, patterns in os_patterns.items():
+                if any(pattern in user_lower for pattern in patterns):
+                    extracted["os"] = os_type
+                    break
+            
+            # Detect environment
+            if "prod" in user_lower or "production" in user_lower:
                 extracted["environment"] = "PROD"
-            elif any(x in processed_input.lower() for x in ["dev", "test", "nonprod"]):
+            elif any(x in user_lower for x in ["dev", "test", "nonprod", "non-prod", "staging"]):
                 extracted["environment"] = "NONPROD"
+            
+            # Detect zone/region
+            import re
+            zone_pattern = r'\b(us-\w+(-\w+)?|europe-\w+(-\w+)?|asia-\w+(-\w+)?)\b'
+            zone_match = re.search(zone_pattern, user_lower)
+            if zone_match:
+                extracted["zone"] = zone_match.group(0)
+            
+            # Detect machine type
+            machine_patterns = ['e2-', 'n1-', 'n2-', 't2.', 'm5.', 'standard']
+            for pattern in machine_patterns:
+                if pattern in user_lower:
+                    # Try to extract the full machine type
+                    machine_match = re.search(f'{pattern}\w+', user_lower)
+                    if machine_match:
+                        extracted["machine_type"] = machine_match.group(0)
+                    break
+            
+            # Detect use type
+            if any(x in user_lower for x in ['web', 'frontend', 'ui']):
+                extracted["use_type"] = "web_server"
+            elif any(x in user_lower for x in ['app', 'application', 'backend', 'api']):
+                extracted["use_type"] = "app_server"
+            elif any(x in user_lower for x in ['database', 'db', 'mysql', 'postgres']):
+                extracted["use_type"] = "database"
+            
+            # Detect line of business
+            lob_patterns = ['retail', 'banking', 'insurance', 'healthcare', 'finance', 'manufacturing']
+            for lob in lob_patterns:
+                if lob in user_lower:
+                    extracted["line_of_business"] = lob
+                    break
             
             routing_decision = {
                 "next_agent": "compute",
@@ -199,12 +279,13 @@ class OrchestratorAgent(BaseAgent):
                     "extracted_requirements": extracted,
                     "missing_info": [],
                     "conversation_history": [],
-                    "confidence": 0.9
+                    "confidence": 0.95
                 },
-                "reasoning": "Simple VM request detected - routing directly to compute agent",
+                "reasoning": f"VM request detected with keywords - routing to compute agent. Extracted: {list(extracted.keys())}",
                 "mode": "fast_path"
             }
             reasoning_chain = []
+            logger.info(f"[Orchestrator] Fast path extracted: {extracted}")
         else:
             # Use reasoning engine for complex requests
             routing_decision, reasoning_chain = await self.reasoning_engine.reason(
@@ -243,16 +324,25 @@ class OrchestratorAgent(BaseAgent):
         Direct LLM reasoning for routing decision
         Simplified prompt focusing on resource type detection only
         """
-        # Check if this is a simple request
-        is_simple = len(user_input) < 100 and any(kw in user_input.lower() for kw in ['vm', 'server', 'instance', 'compute'])
+        # Enhanced simple request detection
+        vm_keywords = ['vm', 'vms', 'virtual machine', 'virtual-machine',
+                      'instance', 'instances', 'server', 'servers',
+                      'compute', 'machine', 'box', 'node']
+        is_simple = len(user_input) < 100 and any(kw in user_input.lower() for kw in vm_keywords)
         
         if is_simple:
-            # Simplified prompt for simple requests
+            # Simplified prompt for simple requests with VM-specific examples
             routing_prompt = f"""
             Route this request to the correct agent:
             User: {user_input}
             
             Available agents: {list(self.available_agents.keys())}
+            
+            Examples:
+            - "I want a VM" -> {{"resource_type": "vm", "next_agent": "compute", "confidence": 0.95}}
+            - "Create a GCP instance" -> {{"resource_type": "vm", "next_agent": "compute", "confidence": 0.95}}
+            - "Deploy a server" -> {{"resource_type": "vm", "next_agent": "compute", "confidence": 0.9}}
+            - "Need a database" -> {{"resource_type": "database", "next_agent": "database", "confidence": 0.9}}
             
             Detect resource type and return JSON:
             {{
@@ -260,9 +350,11 @@ class OrchestratorAgent(BaseAgent):
                 "next_agent": "agent_name",
                 "confidence": 0.0-1.0
             }}
+            
+            IMPORTANT: For any VM, server, instance, or compute request, route to "compute" agent.
             """
         else:
-            # Full prompt for complex requests
+            # Full prompt for complex requests with better VM detection
             routing_prompt = f"""
             As an intelligent orchestrator, analyze this request and decide routing:
             
@@ -272,9 +364,16 @@ class OrchestratorAgent(BaseAgent):
             Available agents:
             {json.dumps(self.available_agents)}
             
-            Focus on:
-            1. Resource type (vm, database, network, storage)
-            2. Which agent handles this type
+            Routing rules:
+            1. VM/instance/server/compute requests -> "compute" agent
+            2. Database requests -> "database" agent
+            3. Unclear requests -> "clarification" agent
+            
+            Common VM request patterns:
+            - "I want/need a VM/server/instance"
+            - "Create/deploy/provision a VM/server/instance"
+            - "Set up a Windows/Linux machine"
+            - References to GCP/AWS/Azure compute resources
             
             Respond in JSON:
             {{
@@ -285,12 +384,23 @@ class OrchestratorAgent(BaseAgent):
                 "next_agent": "agent_name",
                 "reasoning": "brief explanation"
             }}
+            
+            IMPORTANT: Default to "compute" agent for ANY request mentioning VMs, servers, instances, or compute resources.
             """
         
         result = self._llm_reason(routing_prompt)
         
+        # Validate and correct routing decision for obvious VM requests
+        vm_keywords = ['vm', 'vms', 'virtual machine', 'instance', 'server', 'compute', 'machine']
+        if any(kw in user_input.lower() for kw in vm_keywords):
+            if result.get("next_agent") == "clarification":
+                logger.warning(f"[Orchestrator] Correcting routing: VM keywords detected but routed to clarification")
+                result["next_agent"] = "compute"
+                result["confidence"] = max(result.get("confidence", 0.5), 0.8)
+                result["reasoning"] = "Corrected: VM keywords detected - routing to compute agent"
+        
         # Build routing response
-        next_agent = result.get("next_agent", "clarification")
+        next_agent = result.get("next_agent", "compute")  # Default to compute instead of clarification
         
         # Learn from this routing for future
         self.memory.learned_patterns.append({
