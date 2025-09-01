@@ -165,6 +165,35 @@ async def list_tools(agent_type: Optional[str] = None):
     """List available tools"""
     return {"tools": mcp_server.list_tools(agent_type)}
 
+@app.get("/specialists")
+async def list_specialists():
+    """List all specialists and their availability"""
+    return {
+        "specialists": [
+            {
+                "name": "gce_specialist",
+                "cloud": "gcp",
+                "resource_type": "compute",
+                "available": True,
+                "description": "Google Cloud Compute Engine VMs"
+            },
+            {
+                "name": "ec2_specialist", 
+                "cloud": "aws",
+                "resource_type": "compute",
+                "available": False,
+                "description": "AWS EC2 instances"
+            },
+            {
+                "name": "azure_vm_specialist",
+                "cloud": "azure", 
+                "resource_type": "compute",
+                "available": False,
+                "description": "Azure Virtual Machines"
+            }
+        ]
+    }
+
 @app.post("/tool/execute")
 async def execute_tool(request: ToolRequest):
     """Execute a tool"""

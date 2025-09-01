@@ -152,13 +152,56 @@ class GCESpecialistAgent(BaseAgent):
         Extract VM requirements from raw request with intelligent corrections
         Focus on TAXI required fields only
         """
+        # Get any previously extracted requirements from context
+        extracted_requirements = context.get('extracted_requirements', {})
+        
         extraction_prompt = f"""
         Extract GCE VM requirements from this request:
         {raw_request}
         
-        Context: {json.dumps(context, default=str)[:500]}
+        Context from previous analysis (use as hints if relevant):
+        {json.dumps(extracted_requirements, default=str)}
         
-        Apply intelligent corrections:
+        Full context: {json.dumps(context, default=str)[:500]}
+        
+        IMPORTANT: If the context already contains extracted values (like appEnvironment, os, etc.), 
+        use them unless the raw request explicitly contradicts them.
+        
+        Apply intelligent corrections and inference:
+        
+        ENVIRONMENT INFERENCE (with automatic subtype):
+        - Development keywords: "development", "dev", "develop", "sandbox", "demo", "poc", 
+          "proof of concept", "prototype", "experimental", "training", "learning", "education"
+          → appEnvironment: NONPROD, appEnvironmentSubtype: dev
+        
+        - Testing keywords: "testing", "test", "unit test", "integration", "staging", 
+          "stage", "pre-prod", "preprod", "uat", "user acceptance"
+          → appEnvironment: NONPROD, appEnvironmentSubtype: test
+        
+        - QA keywords: "qa", "quality", "quality assurance", "validation", "verification"
+          → appEnvironment: NONPROD, appEnvironmentSubtype: qa
+        
+        - Performance keywords: "performance", "perf", "load test", "stress test", 
+          "benchmark", "capacity"
+          → appEnvironment: NONPROD, appEnvironmentSubtype: perf
+        
+        - Production keywords: "production", "prod", "live", "operational", "operations", 
+          "critical", "customer-facing", "public"
+          → appEnvironment: PROD
+        
+        OS DEFAULTS (only when OS type is mentioned):
+        - "Linux" or "linux server" without specific distro → LINUX_RHEL9
+        - "Windows" or "windows server" without version → WINDOWS_22
+        - "RHEL" or "Red Hat" without version → LINUX_RHEL9
+        - DO NOT default "server" alone to any OS
+        
+        USE TYPE INFERENCE:
+        - Web/Frontend keywords: "web", "website", "frontend", "ui" → useType: app
+        - Database keywords: "database", "db", "mysql", "postgres", "storage" → useType: database
+        - Backend/API keywords: "api", "backend", "service", "microservice" → useType: app
+        - Default if unclear → useType: app
+        
+        EXISTING CORRECTIONS:
         - "red hat 8" or "rhel 8" → LINUX_RHEL8
         - "red hat 9" or "rhel 9" → LINUX_RHEL9  
         - "windows 2019" or "win19" → WINDOWS_19
@@ -210,6 +253,38 @@ class GCESpecialistAgent(BaseAgent):
         """
         
         result = self._llm_reason(extraction_prompt)
+        
+        # Merge context's extracted_requirements into the extracted_fields
+        if extracted_requirements:
+            if not result.get("extracted_fields"):
+                result["extracted_fields"] = {}
+            
+            # Use context values for any fields that are provided
+            for key, value in extracted_requirements.items():
+                if value is not None and key in ["environment", "appEnvironmentSubtype", "os", "provider", "use_type"]:
+                    # Map the field names appropriately
+                    if key == "environment":
+                        result["extracted_fields"]["appEnvironment"] = value
+                    elif key == "use_type":
+                        result["extracted_fields"]["useType"] = value
+                    else:
+                        result["extracted_fields"][key] = value
+                        
+            # Remove questions for fields we already have from context
+            if result.get("clarifications_needed"):
+                filtered_questions = []
+                for question in result["clarifications_needed"]:
+                    # Check if this question is about a field we already have
+                    if isinstance(question, dict):
+                        field = question.get("field", "")
+                        if field not in ["appEnvironment", "appEnvironmentSubtype"] or not result["extracted_fields"].get(field):
+                            filtered_questions.append(question)
+                    elif isinstance(question, str):
+                        # Simple string questions - check if it's asking about environment
+                        if "environment" not in question.lower() and "prod" not in question.lower():
+                            filtered_questions.append(question)
+                result["clarifications_needed"] = filtered_questions
+        
         return result
     
     async def learn_configuration_patterns(self,

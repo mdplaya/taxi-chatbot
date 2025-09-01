@@ -184,7 +184,22 @@ async def chat(request: ChatRequest):
             # Compute agent now returns next_agent (specialist)
             specialist_name = compute_result.get("next_agent")
             
-            if specialist_name == "gce_specialist":
+            if compute_result.get("next_agent") == "unavailable":
+                specialist_name = compute_result.get("specialist_name", "unknown")
+                cloud_map = {
+                    "ec2_specialist": "AWS EC2",
+                    "azure_vm_specialist": "Azure VM",
+                    "gce_specialist": "GCP GCE"
+                }
+                friendly_name = cloud_map.get(specialist_name, specialist_name)
+                return ChatResponse(
+                    response=f"The {friendly_name} specialist is not yet implemented. Currently, I can only help with GCP VMs.",
+                    needs_clarification=False,
+                    session_id=session_id,
+                    status="unavailable",
+                    mode=current_mode
+                )
+            elif specialist_name == "gce_specialist":
                 # Route to GCE specialist with full context
                 gce_agent = GCESpecialistAgent()
                 provision_result = await gce_agent.create_instance(
@@ -646,78 +661,115 @@ async def chat_stream(request: Request, message: str, session_id: Optional[str] 
             # Handle response based on next agent
             if orchestrator_result["next_agent"] == "compute":
                 await progress_manager.add_progress(
-                    session_id, "Compute", "extracting", 
-                    "Extracting VM requirements from your request...", 30, "in_progress"
+                    session_id, "Compute", "routing", 
+                    "Routing to appropriate specialist...", 30, "in_progress"
                 )
                 
+                # Process through compute agent (now just routing)
                 compute_agent = ComputeAgent()
-                # Create context for compute agent
-                compute_context = {
-                    "provider": orchestrator_result.get("context", {}).get("provider", "gcp"),
-                    "raw_request": message,
-                    "session_id": session_id,
-                    "conversation_history": []
-                }
-                compute_result = await compute_agent.process(compute_context)
+                compute_result = await compute_agent.process(orchestrator_result["context"])
                 
-                # Update session with extracted requirements
-                for key, value in compute_result.items():
-                    if hasattr(session.vm_request, key) and value is not None:
-                        setattr(session.vm_request, key, value)
+                # Compute agent now returns next_agent (specialist)
+                specialist_name = compute_result.get("next_agent")
                 
-                # Check for missing fields
-                missing = session.vm_request.get_missing_fields()
-                
-                if missing:
-                    await progress_manager.add_progress(
-                        session_id, "Clarification", "checking", 
-                        "Identifying missing information...", 50, "in_progress"
-                    )
-                    
-                    clarification_agent = ClarificationAgent()
-                    questions = await clarification_agent.generate_questions(
-                        session.vm_request, missing
-                    )
-                    
-                    # Send clarification response
-                    yield {
-                        "event": "clarification",
-                        "data": json.dumps({
-                            "response": "I need some additional information to provision your VM:",
-                            "needs_clarification": True,
-                            "questions": questions,
-                            "session_id": session_id,
-                            "status": "gathering_info"
-                        })
+                if compute_result.get("next_agent") == "unavailable":
+                    specialist_name = compute_result.get("specialist_name", "unknown")
+                    cloud_map = {
+                        "ec2_specialist": "AWS EC2",
+                        "azure_vm_specialist": "Azure VM",
+                        "gce_specialist": "GCP GCE"
                     }
-                else:
-                    # Ready to provision
-                    await progress_manager.add_progress(
-                        session_id, "GCE Specialist", "provisioning", 
-                        "Preparing TAXI payload for VM provisioning...", 80, "in_progress"
-                    )
-                    
-                    gce_agent = GCESpecialistAgent()
-                    provision_result = gce_agent.provision(session.vm_request)
-                    
-                    session.taxi_payload = provision_result.get("payload")
-                    session.taxi_response = provision_result.get("response")
-                    session.status = "complete" if provision_result.get("success") else "failed"
-                    
-                    await progress_manager.add_progress(
-                        session_id, "GCE Specialist", "complete", 
-                        "VM provisioning request completed", 100, "completed"
-                    )
-                    
-                    # Send final response
+                    friendly_name = cloud_map.get(specialist_name, specialist_name)
                     yield {
-                        "event": "complete",
+                        "event": "error",
                         "data": json.dumps({
-                            "response": provision_result.get("message", "VM provisioning completed"),
+                            "response": f"The {friendly_name} specialist is not yet implemented. Currently, I can only help with GCP VMs.",
                             "needs_clarification": False,
                             "session_id": session_id,
-                            "final_payload": session.taxi_payload,
-                            "status": session.status
+                            "status": "unavailable"
+                        })
+                    }
+                elif specialist_name == "gce_specialist":
+                    await progress_manager.add_progress(
+                        session_id, "GCE Specialist", "analyzing", 
+                        "Analyzing GCP VM requirements...", 50, "in_progress"
+                    )
+                    
+                    # Route to GCE specialist with full context
+                    gce_agent = GCESpecialistAgent()
+                    context_to_pass = compute_result.get("context", orchestrator_result["context"])
+                    logger.info(f"[Streaming] Passing context to GCE specialist: {context_to_pass}")
+                    provision_result = await gce_agent.create_instance(context_to_pass)
+                    logger.info(f"[Streaming] GCE specialist returned: {type(provision_result)}: {provision_result}")
+                    
+                    # Handle error if provision_result is not a dict
+                    if not isinstance(provision_result, dict):
+                        logger.error(f"Invalid provision_result type: {type(provision_result)}: {provision_result}")
+                        provision_result = {
+                            "needs_clarification": False, 
+                            "success": False,
+                            "message": "Error processing request"
+                        }
+                    
+                    # Check if clarification needed from GCE specialist
+                    if provision_result.get("needs_clarification"):
+                        questions = provision_result.get("questions", [])
+                        
+                        # Store partial data in session if available
+                        if provision_result.get("partial_data"):
+                            partial_data = provision_result["partial_data"]
+                            for key, value in partial_data.items():
+                                if value is not None and hasattr(session.vm_request, key):
+                                    setattr(session.vm_request, key, value)
+                        
+                        session.status = "gathering_info"
+                        legacy_sessions[session_id] = session
+                        
+                        # Format questions for client
+                        formatted_questions = []
+                        for q in questions:
+                            formatted_questions.append({
+                                "field": q.get("field", "please"),
+                                "question": q.get("question", "Please provide this information."),
+                                "description": q.get("description", "")
+                            })
+                        
+                        # Send clarification response
+                        yield {
+                            "event": "clarification", 
+                            "data": json.dumps({
+                                "response": f"I need some additional information to create your VM:\n\n*{provision_result.get('message', '')}*",
+                                "needs_clarification": True,
+                                "questions": formatted_questions,
+                                "session_id": session_id,
+                                "status": "gathering_info"
+                            })
+                        }
+                    else:
+                        # Ready to provision
+                        await progress_manager.add_progress(
+                            session_id, "GCE Specialist", "provisioning", 
+                            "Preparing TAXI payload for VM provisioning...", 80, "in_progress"
+                        )
+                        
+                        session.taxi_payload = provision_result.get("payload")
+                        session.taxi_response = provision_result.get("response")
+                        session.status = "complete" if provision_result.get("success") else "failed"
+                        
+                        await progress_manager.add_progress(
+                            session_id, "GCE Specialist", "complete", 
+                            "VM provisioning request completed", 100, "completed"
+                        )
+                        
+                        # Send final response
+                        yield {
+                            "event": "complete",
+                            "data": json.dumps({
+                                "response": provision_result.get("message", "VM provisioning completed"),
+                                "needs_clarification": False,
+                                "session_id": session_id,
+                                "final_payload": session.taxi_payload,
+                                "status": session.status
                         })
                     }
             
