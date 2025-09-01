@@ -725,14 +725,25 @@ async def chat_stream(request: Request, message: str, session_id: Optional[str] 
                         session.status = "gathering_info"
                         legacy_sessions[session_id] = session
                         
-                        # Format questions for client
+                        # Format questions for client (handle both string and dict formats)
                         formatted_questions = []
                         for q in questions:
-                            formatted_questions.append({
-                                "field": q.get("field", "please"),
-                                "question": q.get("question", "Please provide this information."),
-                                "description": q.get("description", "")
-                            })
+                            if isinstance(q, str):
+                                # Simple string question (from GCE Specialist)
+                                field = q.split(" ")[0].lower() if q else "please"
+                                formatted_questions.append({
+                                    "field": field,
+                                    "question": str(q),  # Ensure it's a string
+                                    "description": ""
+                                })
+                            elif isinstance(q, dict):
+                                # Dictionary question (from Clarification Agent)
+                                formatted_questions.append({
+                                    "field": q.get("field", "please"),
+                                    "question": q.get("question", "Please provide this information."),
+                                    "description": q.get("description", "")
+                                })
+                            # Skip any other types (None, etc.)
                         
                         # Send clarification response
                         yield {
