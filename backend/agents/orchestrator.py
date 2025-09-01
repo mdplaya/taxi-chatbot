@@ -224,17 +224,68 @@ class OrchestratorAgent(BaseAgent):
             else:
                 extracted["provider"] = "gcp"  # Default to GCP
             
-            # Detect OS
+            # Enhanced OS detection with defaults
+            os_detected = False
             for os_type, patterns in os_patterns.items():
                 if any(pattern in user_lower for pattern in patterns):
                     extracted["os"] = os_type
+                    os_detected = True
                     break
             
-            # Detect environment
-            if "prod" in user_lower or "production" in user_lower:
-                extracted["environment"] = "PROD"
-            elif any(x in user_lower for x in ["dev", "test", "nonprod", "non-prod", "staging"]):
-                extracted["environment"] = "NONPROD"
+            # Apply OS defaults if not detected
+            if not os_detected:
+                if 'linux' in user_lower:
+                    # Check for specific distros
+                    if 'rhel' in user_lower or 'red hat' in user_lower:
+                        if '8' in user_lower:
+                            extracted["os"] = "LINUX_RHEL8"
+                        elif '9' in user_lower:
+                            extracted["os"] = "LINUX_RHEL9"
+                        else:
+                            extracted["os"] = "LINUX_RHEL9"  # Default RHEL version
+                    elif not any(x in user_lower for x in ['ubuntu', 'centos', 'debian']):
+                        extracted["os"] = "LINUX_RHEL9"  # Default Linux
+                elif 'windows' in user_lower:
+                    if '2019' in user_lower or '19' in user_lower:
+                        extracted["os"] = "WINDOWS_19"
+                    elif '2022' in user_lower or '22' in user_lower:
+                        extracted["os"] = "WINDOWS_22"
+                    else:
+                        extracted["os"] = "WINDOWS_22"  # Default Windows
+                elif 'server' in user_lower:
+                    extracted["os"] = "LINUX_RHEL9"  # Default for generic "server"
+            
+            # Comprehensive environment detection with subtype
+            env_keywords = {
+                'PROD': ['production', 'prod', 'live', 'operational', 'operations', 
+                         'critical', 'customer-facing', 'public'],
+                'NONPROD': {
+                    'dev': ['development', 'dev', 'develop', 'sandbox', 'demo', 'poc', 
+                            'proof of concept', 'prototype', 'experimental', 'training', 
+                            'learning', 'education'],
+                    'test': ['testing', 'test', 'unit test', 'integration', 'staging', 
+                             'stage', 'pre-prod', 'preprod', 'uat', 'user acceptance'],
+                    'qa': ['qa', 'quality', 'quality assurance', 'validation', 'verification'],
+                    'perf': ['performance', 'perf', 'load test', 'stress test', 
+                             'benchmark', 'capacity']
+                }
+            }
+            
+            # Check for PROD first
+            for keyword in env_keywords['PROD']:
+                if keyword in user_lower:
+                    extracted["environment"] = "PROD"
+                    break
+            else:
+                # Check for NONPROD with subtype
+                for subtype, keywords in env_keywords['NONPROD'].items():
+                    for keyword in keywords:
+                        if keyword in user_lower:
+                            extracted["environment"] = "NONPROD"
+                            extracted["appEnvironmentSubtype"] = subtype
+                            break
+                    if extracted.get("environment"):
+                        break
             
             # Detect zone/region
             import re
@@ -253,13 +304,16 @@ class OrchestratorAgent(BaseAgent):
                         extracted["machine_type"] = machine_match.group(0)
                     break
             
-            # Detect use type
-            if any(x in user_lower for x in ['web', 'frontend', 'ui']):
-                extracted["use_type"] = "web_server"
-            elif any(x in user_lower for x in ['app', 'application', 'backend', 'api']):
-                extracted["use_type"] = "app_server"
-            elif any(x in user_lower for x in ['database', 'db', 'mysql', 'postgres']):
+            # Enhanced use type detection
+            if any(x in user_lower for x in ['database', 'db', 'mysql', 'postgres', 'mongodb', 'redis', 'storage']):
                 extracted["use_type"] = "database"
+            elif any(x in user_lower for x in ['web', 'website', 'frontend', 'ui']):
+                extracted["use_type"] = "app"  # Map to 'app' for TAXI compatibility
+            elif any(x in user_lower for x in ['api', 'backend', 'service', 'microservice', 'application']):
+                extracted["use_type"] = "app"
+            else:
+                # Default use type if unclear
+                extracted["use_type"] = "app"
             
             # Detect line of business
             lob_patterns = ['retail', 'banking', 'insurance', 'healthcare', 'finance', 'manufacturing']
@@ -286,6 +340,22 @@ class OrchestratorAgent(BaseAgent):
             }
             reasoning_chain = []
             logger.info(f"[Orchestrator] Fast path extracted: {extracted}")
+            
+            # Log environment inference if applied
+            if extracted.get("environment"):
+                env_msg = f"Inferred environment: {extracted['environment']}"
+                if extracted.get("appEnvironmentSubtype"):
+                    env_msg += f" (subtype: {extracted['appEnvironmentSubtype']})"
+                logger.info(f"[Orchestrator] {env_msg}")
+            
+            # Log OS defaults if applied
+            if extracted.get("os"):
+                if 'linux' in user_lower and extracted["os"] == "LINUX_RHEL9":
+                    logger.info("[Orchestrator] Applied default OS: LINUX_RHEL9 for generic Linux")
+                elif 'windows' in user_lower and extracted["os"] == "WINDOWS_22":
+                    logger.info("[Orchestrator] Applied default OS: WINDOWS_22 for generic Windows")
+                elif 'server' in user_lower and extracted["os"] == "LINUX_RHEL9":
+                    logger.info("[Orchestrator] Applied default OS: LINUX_RHEL9 for generic server")
         else:
             # Use reasoning engine for complex requests
             routing_decision, reasoning_chain = await self.reasoning_engine.reason(

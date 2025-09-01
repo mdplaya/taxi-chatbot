@@ -158,7 +158,41 @@ class GCESpecialistAgent(BaseAgent):
         
         Context: {json.dumps(context, default=str)[:500]}
         
-        Apply intelligent corrections:
+        Apply intelligent corrections and inference:
+        
+        ENVIRONMENT INFERENCE (with automatic subtype):
+        - Development keywords: "development", "dev", "develop", "sandbox", "demo", "poc", 
+          "proof of concept", "prototype", "experimental", "training", "learning", "education"
+          → appEnvironment: NONPROD, appEnvironmentSubtype: dev
+        
+        - Testing keywords: "testing", "test", "unit test", "integration", "staging", 
+          "stage", "pre-prod", "preprod", "uat", "user acceptance"
+          → appEnvironment: NONPROD, appEnvironmentSubtype: test
+        
+        - QA keywords: "qa", "quality", "quality assurance", "validation", "verification"
+          → appEnvironment: NONPROD, appEnvironmentSubtype: qa
+        
+        - Performance keywords: "performance", "perf", "load test", "stress test", 
+          "benchmark", "capacity"
+          → appEnvironment: NONPROD, appEnvironmentSubtype: perf
+        
+        - Production keywords: "production", "prod", "live", "operational", "operations", 
+          "critical", "customer-facing", "public"
+          → appEnvironment: PROD
+        
+        OS DEFAULTS:
+        - "Linux" or "linux server" without specific distro → LINUX_RHEL9
+        - "Windows" or "windows server" without version → WINDOWS_22
+        - "server" alone without OS specified → LINUX_RHEL9
+        - "RHEL" or "Red Hat" without version → LINUX_RHEL9
+        
+        USE TYPE INFERENCE:
+        - Web/Frontend keywords: "web", "website", "frontend", "ui" → useType: app
+        - Database keywords: "database", "db", "mysql", "postgres", "storage" → useType: database
+        - Backend/API keywords: "api", "backend", "service", "microservice" → useType: app
+        - Default if unclear → useType: app
+        
+        EXISTING CORRECTIONS:
         - "red hat 8" or "rhel 8" → LINUX_RHEL8
         - "red hat 9" or "rhel 9" → LINUX_RHEL9  
         - "windows 2019" or "win19" → WINDOWS_19
