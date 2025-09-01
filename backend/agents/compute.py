@@ -11,6 +11,7 @@ from datetime import datetime
 from agents.base_agent import BaseAgent, Action
 from utils.learning import Pattern, PatternType
 import os
+import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,10 @@ class ComputeAgent(BaseAgent):
         )
         self.mcp = mcp_client
         self.logger = logging.getLogger(self.__class__.__name__)
+        # Use environment variable or default to mcp-server hostname
+        import os
+        self.mcp_url = os.getenv("MCP_SERVER_URL", "http://mcp-server:8001")
+        self._available_specialists = None  # Cache
         
         # Available compute specialists
         self.compute_specialists = {
@@ -39,6 +44,26 @@ class ComputeAgent(BaseAgent):
             "azure_vm_specialist": "Azure Virtual Machines",
             "aks_specialist": "Azure Kubernetes Service"
         }
+    
+    async def _get_available_specialists(self) -> List[Dict[str, Any]]:
+        """Get list of available specialists from MCP server"""
+        if self._available_specialists is not None:
+            return self._available_specialists
+        
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(f"{self.mcp_url}/specialists")
+                if response.status_code == 200:
+                    data = response.json()
+                    self._available_specialists = data.get("specialists", [])
+                    return self._available_specialists
+        except Exception as e:
+            self.logger.warning(f"Failed to get specialists from MCP: {e}")
+        
+        # Fallback if MCP is unavailable
+        return [
+            {"name": "gce_specialist", "cloud": "gcp", "available": True}
+        ]
         
     def get_available_tools(self) -> List[Dict[str, Any]]:
         """Define available tools for compute routing"""
@@ -235,44 +260,58 @@ class ComputeAgent(BaseAgent):
             logger.warning(f"Unknown action: {action.name}")
             return None
     
-    def _detect_compute_type(self, user_input: str, context: Dict[str, Any]) -> Dict[str, Any]:
+    async def _detect_compute_type(self, user_input: str, context: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Detect compute type and determine appropriate specialist
-        Pure LLM reasoning for routing decision
+        Detect compute type and provider using LLM with MCP discovery
         """
-        routing_prompt = f"""
-        Analyze this compute request and determine the appropriate specialist:
+        # Get available specialists
+        specialists = await self._get_available_specialists()
         
-        User Input: {user_input}
-        Context: {json.dumps(context, default=str)}
+        # Build specialist info for prompt
+        specialist_info = []
+        for spec in specialists:
+            status = "AVAILABLE" if spec.get("available") else "NOT IMPLEMENTED"
+            specialist_info.append(
+                f"- {spec['name']} (handles {spec.get('cloud', 'unknown').upper()} {spec.get('resource_type', 'compute')}) - {status}"
+            )
+        
+        routing_prompt = f"""
+        Route this compute request to the appropriate specialist.
+        
+        User request: {user_input}
+        Context from orchestrator: {json.dumps(context.get('extracted_requirements', {}), default=str)}
         
         Available specialists:
-        {json.dumps(self.compute_specialists)}
+        {chr(10).join(specialist_info)}
         
-        Apply intelligent corrections for common typos and variations:
-        - "google cloud", "gcp", "gce" → gce_specialist
-        - "kubernetes", "k8s", "container" → gke_specialist (GCP), eks_specialist (AWS), aks_specialist (Azure)
-        - "aws", "ec2", "amazon" → ec2_specialist
-        - "azure", "microsoft" → azure_vm_specialist
-        - "vm", "virtual machine", "instance", "server" → determine based on cloud provider
-        
-        Determine:
-        1. What type of compute resource (VM, Kubernetes, serverless)?
-        2. Which cloud provider (GCP, AWS, Azure)?
-        3. Which specialist should handle this?
+        Apply intelligent routing:
+        - If user mentions AWS/EC2/Amazon → route to ec2_specialist
+        - If user mentions Azure/Microsoft → route to azure_vm_specialist  
+        - If user mentions GCP/Google/GCE → route to gce_specialist
+        - If unclear but looks like VM request and only one specialist is available → route there
+        - If unclear and multiple available → ask for clarification
         
         Return JSON:
         {{
             "specialist": "specialist_name",
             "reasoning": "why this specialist",
-            "detected_provider": "gcp/aws/azure/unclear",
-            "detected_type": "vm/kubernetes/serverless",
-            "corrections_applied": ["list of corrections"],
+            "detected_provider": "gcp/aws/azure/unclear", 
+            "is_available": true/false,
             "confidence": 0.0-1.0
         }}
         """
         
         result = self._llm_reason(routing_prompt)
+        
+        # Verify specialist availability
+        if result.get("specialist"):
+            spec_name = result["specialist"]
+            available_spec = next((s for s in specialists if s["name"] == spec_name), None)
+            if available_spec:
+                result["is_available"] = available_spec.get("available", False)
+            else:
+                result["is_available"] = False
+                
         return result
     
     def _apply_corrections(self, user_input: str) -> str:
@@ -324,7 +363,18 @@ class ComputeAgent(BaseAgent):
         self.current_step += 1
         await self.emit_progress("detecting", "Detecting compute type and provider", 33)
         
-        routing_decision = self._detect_compute_type(raw_request, context)
+        routing_decision = await self._detect_compute_type(raw_request, context)
+        
+        # Check if specialist is available
+        if routing_decision.get("specialist") and not routing_decision.get("is_available", True):
+            specialist_name = routing_decision.get("specialist")
+            return {
+                "next_agent": "unavailable",
+                "specialist_name": specialist_name,
+                "context": context,
+                "routing_metadata": routing_decision,
+                "mode": "llm_routing"
+            }
         
         # Step 2: Apply corrections if needed
         self.current_step += 1
@@ -334,14 +384,9 @@ class ComputeAgent(BaseAgent):
         self.current_step += 1
         specialist = routing_decision.get("specialist")
         
-        # Default to GCE if unclear but looks like VM request
         if not specialist or specialist == "unclear":
-            if any(kw in raw_request.lower() for kw in ['vm', 'server', 'instance', 'linux', 'windows']):
-                specialist = "gce_specialist"
-                self.logger.info("[ComputeAgent] Defaulting to gce_specialist for VM-like request")
-            else:
-                specialist = "clarification"
-                self.logger.info("[ComputeAgent] Routing to clarification for unclear request")
+            specialist = "clarification"
+            self.logger.info("[ComputeAgent] Routing to clarification for unclear request")
         
         await self.emit_progress("complete", f"Routing complete - sending to {specialist}", 100)
         

@@ -152,11 +152,20 @@ class GCESpecialistAgent(BaseAgent):
         Extract VM requirements from raw request with intelligent corrections
         Focus on TAXI required fields only
         """
+        # Get any previously extracted requirements from context
+        extracted_requirements = context.get('extracted_requirements', {})
+        
         extraction_prompt = f"""
         Extract GCE VM requirements from this request:
         {raw_request}
         
-        Context: {json.dumps(context, default=str)[:500]}
+        Context from previous analysis (use as hints if relevant):
+        {json.dumps(extracted_requirements, default=str)}
+        
+        Full context: {json.dumps(context, default=str)[:500]}
+        
+        IMPORTANT: If the context already contains extracted values (like appEnvironment, os, etc.), 
+        use them unless the raw request explicitly contradicts them.
         
         Apply intelligent corrections and inference:
         
@@ -180,11 +189,11 @@ class GCESpecialistAgent(BaseAgent):
           "critical", "customer-facing", "public"
           → appEnvironment: PROD
         
-        OS DEFAULTS:
+        OS DEFAULTS (only when OS type is mentioned):
         - "Linux" or "linux server" without specific distro → LINUX_RHEL9
         - "Windows" or "windows server" without version → WINDOWS_22
-        - "server" alone without OS specified → LINUX_RHEL9
         - "RHEL" or "Red Hat" without version → LINUX_RHEL9
+        - DO NOT default "server" alone to any OS
         
         USE TYPE INFERENCE:
         - Web/Frontend keywords: "web", "website", "frontend", "ui" → useType: app

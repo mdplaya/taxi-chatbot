@@ -252,8 +252,6 @@ class OrchestratorAgent(BaseAgent):
                         extracted["os"] = "WINDOWS_22"
                     else:
                         extracted["os"] = "WINDOWS_22"  # Default Windows
-                elif 'server' in user_lower:
-                    extracted["os"] = "LINUX_RHEL9"  # Default for generic "server"
             
             # Comprehensive environment detection with subtype
             env_keywords = {

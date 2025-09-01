@@ -24,7 +24,7 @@ services:
       - PYTHONUNBUFFERED=1
       - MCP_SERVER_PORT=8001
     volumes:
-      - ./backend/mcp_server:/app
+      - ./backend:/app
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
       interval: 30s

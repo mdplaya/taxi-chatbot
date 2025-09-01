@@ -184,7 +184,22 @@ async def chat(request: ChatRequest):
             # Compute agent now returns next_agent (specialist)
             specialist_name = compute_result.get("next_agent")
             
-            if specialist_name == "gce_specialist":
+            if compute_result.get("next_agent") == "unavailable":
+                specialist_name = compute_result.get("specialist_name", "unknown")
+                cloud_map = {
+                    "ec2_specialist": "AWS EC2",
+                    "azure_vm_specialist": "Azure VM",
+                    "gce_specialist": "GCP GCE"
+                }
+                friendly_name = cloud_map.get(specialist_name, specialist_name)
+                return ChatResponse(
+                    response=f"The {friendly_name} specialist is not yet implemented. Currently, I can only help with GCP VMs.",
+                    needs_clarification=False,
+                    session_id=session_id,
+                    status="unavailable",
+                    mode=current_mode
+                )
+            elif specialist_name == "gce_specialist":
                 # Route to GCE specialist with full context
                 gce_agent = GCESpecialistAgent()
                 provision_result = await gce_agent.create_instance(
