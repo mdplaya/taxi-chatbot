@@ -7,6 +7,10 @@ __pycache__/
 env/
 .venv/
 backend/.venv
+backend/**/__pycache__/
+backend/agents/__pycache__/
+backend/api/__pycache__/
+backend/models/__pycache__/
 ENV/
 build/
 develop-eggs/
@@ -33,10 +37,13 @@ yarn-error.log*
 
 # Next.js
 .next/
+frontend/.next/
 out/
 build/
 *.tsbuildinfo
 next-env.d.ts
+.vercel
+*.local
 
 # Environment variables
 .env
