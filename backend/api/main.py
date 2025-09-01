@@ -48,6 +48,81 @@ else:
 # Initialize FastAPI app
 app = FastAPI(title="TAXI Chatbot API")
 
+def normalize_vm_field_value(field: str, value: Any) -> Any:
+    """
+    Normalize raw values to proper enum values for VMRequest fields.
+    Handles common variations and ensures Pydantic validation passes.
+    """
+    if value is None:
+        return None
+    
+    # Normalize based on field type
+    if field == "appEnvironment":
+        value_upper = str(value).upper()
+        if value_upper in ["PROD", "PRODUCTION"]:
+            return "PROD"
+        elif value_upper in ["NONPROD", "NON-PROD", "DEV", "TEST", "QA", "DEVELOPMENT", "TESTING"]:
+            return "NONPROD"
+        return value  # Return as-is if not recognized
+    
+    elif field == "appEnvironmentSubtype":
+        value_lower = str(value).lower()
+        if value_lower in ["dev", "development", "develop"]:
+            return "dev"
+        elif value_lower in ["qa", "quality", "quality-assurance"]:
+            return "qa"
+        elif value_lower in ["test", "testing", "integration"]:
+            return "test"
+        elif value_lower in ["perf", "performance", "load"]:
+            return "perf"
+        return value  # Return as-is if not recognized
+    
+    elif field == "os":
+        value_lower = str(value).lower()
+        # Handle RHEL variations
+        if "rhel" in value_lower or "red hat" in value_lower:
+            if "9" in value_lower:
+                return "LINUX_RHEL9"
+            else:
+                return "LINUX_RHEL8"  # Default to RHEL8
+        # Handle generic Linux
+        elif "linux" in value_lower:
+            return "LINUX_RHEL8"  # Default Linux
+        # Handle Windows variations
+        elif "windows" in value_lower or "win" in value_lower:
+            if "22" in value_lower or "2022" in value_lower:
+                return "WINDOWS_22"
+            elif "19" in value_lower or "2019" in value_lower:
+                return "WINDOWS_19"
+            else:
+                return "WINDOWS_22"  # Default Windows
+        return value  # Return as-is if not recognized
+    
+    elif field == "useType":
+        value_lower = str(value).lower()
+        if "app" in value_lower or "application" in value_lower:
+            return "app"
+        elif "database" in value_lower or "db" in value_lower:
+            return "database"
+        return value  # Return as-is if not recognized
+    
+    elif field == "lineOfBusiness":
+        value_upper = str(value).upper()
+        if "RETAIL" in value_upper:
+            return "RETAIL"
+        elif "ISTS" in value_upper:
+            return "ISTS"
+        elif "EDML" in value_upper:
+            return "EDML"
+        return value  # Return as-is if not recognized
+    
+    elif field == "machineType":
+        # Machine types are already specific strings, just return
+        return str(value)
+    
+    # For other fields (zone, costCenter, project, id), return as-is
+    return value
+
 # Configure CORS for web and mobile clients
 app.add_middleware(
     CORSMiddleware,
@@ -215,7 +290,8 @@ async def chat(request: ChatRequest):
                         partial_data = provision_result["partial_data"]
                         for key, value in partial_data.items():
                             if value is not None and hasattr(session.vm_request, key):
-                                setattr(session.vm_request, key, value)
+                                normalized_value = normalize_vm_field_value(key, value)
+                                setattr(session.vm_request, key, normalized_value)
                     
                     session.status = "gathering_info"
                     legacy_sessions[session_id] = session
@@ -354,7 +430,8 @@ async def chat(request: ChatRequest):
                     # Update session with extracted requirements
                     for key, value in compute_result.items():
                         if hasattr(session.vm_request, key) and value is not None:
-                            setattr(session.vm_request, key, value)
+                            normalized_value = normalize_vm_field_value(key, value)
+                            setattr(session.vm_request, key, normalized_value)
                     
                     # Check for missing fields and generate clarifications
                     missing = session.vm_request.get_missing_fields()
@@ -472,7 +549,11 @@ async def answer_clarification(request: AnswerRequest):
     
     # Convert dict to VMRequest if needed
     if isinstance(current_vm, dict):
-        vm_request_obj = VMRequest(**current_vm)
+        # Normalize all enum fields in the dict before creating VMRequest
+        normalized_vm = {}
+        for key, value in current_vm.items():
+            normalized_vm[key] = normalize_vm_field_value(key, value)
+        vm_request_obj = VMRequest(**normalized_vm)
     else:
         vm_request_obj = current_vm
     
@@ -720,7 +801,8 @@ async def chat_stream(request: Request, message: str, session_id: Optional[str] 
                             partial_data = provision_result["partial_data"]
                             for key, value in partial_data.items():
                                 if value is not None and hasattr(session.vm_request, key):
-                                    setattr(session.vm_request, key, value)
+                                    normalized_value = normalize_vm_field_value(key, value)
+                                    setattr(session.vm_request, key, normalized_value)
                         
                         session.status = "gathering_info"
                         legacy_sessions[session_id] = session

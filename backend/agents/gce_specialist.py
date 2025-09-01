@@ -250,6 +250,14 @@ class GCESpecialistAgent(BaseAgent):
             "clarifications_needed": ["specific questions for missing info"],
             "confidence": 0.0-1.0
         }}
+        
+        CRITICAL: Return EXACT enum values (case-sensitive):
+        - appEnvironment: MUST be exactly "NONPROD" or "PROD" (not "nonprod", "dev", etc.)
+        - os: MUST be exactly "LINUX_RHEL8", "LINUX_RHEL9", "WINDOWS_19", or "WINDOWS_22"
+        - useType: MUST be exactly "app" or "database" (lowercase)
+        - lineOfBusiness: MUST be exactly "RETAIL", "ISTS", or "EDML" (uppercase)
+        - appEnvironmentSubtype: MUST be exactly "dev", "qa", "test", or "perf" (lowercase)
+        - machineType: Use exact GCP machine type strings (e.g., "e2-small", "n1-standard-1")
         """
         
         result = self._llm_reason(extraction_prompt)
