@@ -91,14 +91,14 @@ class TestExtractVMRequirements:
     def test_partial_requirements(self):
         """Test request with only some requirements"""
         result = extract_vm_requirements("I need a Linux server")
-        assert result.get('os') == 'LINUX_RHEL8'  # Default
+        assert result.get('os') == 'LINUX_RHEL9'  # Default
         assert 'environment' not in result
         assert 'zone' not in result
     
     def test_ubuntu_maps_to_rhel(self):
         """Test Ubuntu maps to RHEL"""
         result = extract_vm_requirements("Create an Ubuntu server")
-        assert result.get('os') == 'LINUX_RHEL8'
+        assert result.get('os') == 'LINUX_RHEL9'
     
     def test_staging_is_nonprod(self):
         """Test staging maps to NONPROD"""

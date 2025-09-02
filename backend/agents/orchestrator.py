@@ -333,8 +333,8 @@ class OrchestratorAgent(BaseAgent):
             elif any(x in user_lower for x in ['api', 'backend', 'service', 'microservice', 'application']):
                 extracted["use_type"] = "app"
             else:
-                # Default use type if unclear
-                extracted["use_type"] = "app"
+                # Don't default use_type - let clarification handle it
+                pass
             
             # Project detection (if mentioned)
             if 'project' in user_lower:

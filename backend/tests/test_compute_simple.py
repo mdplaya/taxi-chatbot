@@ -28,9 +28,9 @@ def extract_vm_requirements(user_input: str) -> dict:
         elif '8' in user_input:
             requirements['os'] = 'LINUX_RHEL8'
         else:
-            requirements['os'] = 'LINUX_RHEL8'  # Default to RHEL8
+            requirements['os'] = 'LINUX_RHEL9'  # Default to RHEL9
     elif 'ubuntu' in user_input_lower:
-        requirements['os'] = 'LINUX_RHEL8'  # Map Ubuntu to RHEL for now
+        requirements['os'] = 'LINUX_RHEL9'  # Map Ubuntu to RHEL9 for now
     
     # Use type detection
     if any(term in user_input_lower for term in ['database', 'db', 'sql', 'mysql', 'postgres', 'mongodb']):

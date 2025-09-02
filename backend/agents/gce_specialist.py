@@ -566,27 +566,43 @@ class GCESpecialistAgent(BaseAgent):
             taxi_payload["action"] = "create"
             return taxi_payload
         else:
-            # Fallback to direct mapping with safe defaults
+            # Fallback to direct mapping WITHOUT defaults
             self.logger.warning("[GCE] Using fallback payload building")
-            # Filter out None values and ensure all required fields
             filtered_dict = {k: v for k, v in vm_dict.items() if v is not None}
+            
+            # Check for required fields
+            missing_fields = []
+            required_fields = ["appEnvironment", "os", "useType", "machineType", "zone", 
+                              "lineOfBusiness", "costCenter", "project", "id"]
+            
+            for field in required_fields:
+                if field not in filtered_dict or filtered_dict[field] is None:
+                    missing_fields.append(field)
+            
+            if missing_fields:
+                self.logger.error(f"[GCE] Missing required fields for TAXI payload: {missing_fields}")
+                # Return error or trigger clarification
+                return {
+                    "success": False,
+                    "needs_clarification": True,
+                    "missing_fields": missing_fields
+                }
+            
             taxi_payload = {
                 "cloud": "gcp",
                 "resourceType": "compute",
                 "action": "create",
-                "appEnvironment": filtered_dict.get("appEnvironment", "NONPROD"),
-                "os": filtered_dict.get("os", "LINUX_RHEL8"),
-                "useType": filtered_dict.get("useType", "app"),
-                "machineType": filtered_dict.get("machineType", "e2-small"),
-                "zone": filtered_dict.get("zone", "us-central1-a"),
-                "lineOfBusiness": filtered_dict.get("lineOfBusiness", "RETAIL"),
-                "costCenter": str(filtered_dict.get("costCenter", "00000")),
-                "project": filtered_dict.get("project", "default-project"),
-                "id": filtered_dict.get("id", "vm-instance")
+                **filtered_dict  # Use only the values we have
             }
+            
+            # Ensure costCenter is string if present
+            if "costCenter" in taxi_payload:
+                taxi_payload["costCenter"] = str(taxi_payload["costCenter"])
+            
             # Add subtype if NONPROD
-            if taxi_payload["appEnvironment"] == "NONPROD":
-                taxi_payload["appEnvironmentSubtype"] = filtered_dict.get("appEnvironmentSubtype", "dev")
+            if taxi_payload.get("appEnvironment") == "NONPROD" and "appEnvironmentSubtype" in filtered_dict:
+                taxi_payload["appEnvironmentSubtype"] = filtered_dict["appEnvironmentSubtype"]
+            
             return taxi_payload
     
     def _provision_instance(self, taxi_payload: Dict[str, Any]) -> Dict[str, Any]:

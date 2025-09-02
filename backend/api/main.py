@@ -83,11 +83,13 @@ def normalize_vm_field_value(field: str, value: Any) -> Any:
         if "rhel" in value_lower or "red hat" in value_lower:
             if "9" in value_lower:
                 return "LINUX_RHEL9"
+            elif "8" in value_lower:
+                return "LINUX_RHEL8"
             else:
-                return "LINUX_RHEL8"  # Default to RHEL8
+                return "LINUX_RHEL9"  # Default to RHEL9
         # Handle generic Linux
         elif "linux" in value_lower:
-            return "LINUX_RHEL8"  # Default Linux
+            return "LINUX_RHEL9"  # Default Linux to RHEL9
         # Handle Windows variations
         elif "windows" in value_lower or "win" in value_lower:
             if "22" in value_lower or "2022" in value_lower:
