@@ -202,13 +202,17 @@ class GCESpecialistAgent(BaseAgent):
         - "Windows" or "windows server" without version → WINDOWS_22
         - "RHEL" or "Red Hat" without version → LINUX_RHEL9
         - DO NOT default "server" alone to any OS
-        
+
         USE TYPE INFERENCE:
-        - Web/Frontend keywords: "web", "website", "frontend", "ui" → useType: app
+        - Web/Frontend keywords: "web", "website", "frontend", "ui" → useType: web
         - Database keywords: "database", "db", "mysql", "postgres", "storage" → useType: database
         - Backend/API keywords: "api", "backend", "service", "microservice" → useType: app
         - Default if unclear → useType: app
         
+        STRICT NON-DEFAULTING FOR ZONE AND MACHINE TYPE:
+        - DO NOT assume or default a GCP zone. If only a region is given (e.g., "us-east4"), mark "zone" as missing and include a clarification question like "Which zone (a, b, c) in us-east4?".
+        - DO NOT assume or default a machine type. If not explicitly specified, mark "machineType" as missing and include a clarification question like "Which GCP machine type (e.g., e2-small, n1-standard-1)?".
+
         EXISTING CORRECTIONS:
         - "red hat 8" or "rhel 8" → LINUX_RHEL8
         - "red hat 9" or "rhel 9" → LINUX_RHEL9  
@@ -259,7 +263,7 @@ class GCESpecialistAgent(BaseAgent):
         CRITICAL: Return EXACT enum values (case-sensitive):
         - appEnvironment: MUST be exactly "NONPROD" or "PROD" (not "nonprod", "dev", etc.)
         - os: MUST be exactly "LINUX_RHEL8", "LINUX_RHEL9", "WINDOWS_19", or "WINDOWS_22"
-        - useType: MUST be exactly "app" or "database" (lowercase)
+        - useType: MUST be exactly "web" or "app" or "database" (lowercase)
         - lineOfBusiness: MUST be exactly "RETAIL", "ISTS", or "EDML" (uppercase)
         - appEnvironmentSubtype: MUST be exactly "dev", "qa", "test", or "perf" (lowercase)
         - machineType: Use exact GCP machine type strings (e.g., "e2-small", "n1-standard-1")
@@ -514,96 +518,65 @@ class GCESpecialistAgent(BaseAgent):
     
     def _build_taxi_payload(self, vm_request: VMRequest) -> Dict[str, Any]:
         """
-        Build TAXI API payload with intelligent field mapping
-        Uses LLM to handle any special cases or transformations
+        Build TAXI API payload deterministically without adding defaults.
+        If required fields are missing, return a clarification request.
         """
         if isinstance(vm_request, dict):
-            # If it's already a dict, use it directly
             vm_dict = vm_request
         else:
-            # Convert VMRequest to dict
             vm_dict = vm_request.dict(exclude_none=True)
         
-        payload_prompt = f"""
-        Build a TAXI API payload from this VM request:
-        {json.dumps(vm_dict, default=str)}
-        
-        The TAXI API expects these fields:
-        - cloud: "gcp"
-        - resourceType: "compute"
-        - action: "create"
-        - appEnvironment: NONPROD or PROD
-        - appEnvironmentSubtype: dev/qa/test/perf (if NONPROD)
-        - os: LINUX_RHEL8/LINUX_RHEL9/WINDOWS_19/WINDOWS_22
-        - useType: app or database
-        - machineType: GCP machine type
-        - zone: GCP zone
-        - lineOfBusiness: RETAIL/ISTS/EDML
-        - costCenter: 5-digit string
-        - project: GCP project name
-        - id: User email
-        
-        Apply any necessary transformations or defaults.
-        Use learned patterns: {json.dumps(self.memory.learned_patterns[-3:])}
-        
-        Return JSON with the complete TAXI payload:
-        {{
-            "payload": {{}},
-            "transformations_applied": [],
-            "defaults_added": [],
-            "confidence": 0.0-1.0
-        }}
-        """
-        
-        result = self._llm_reason(payload_prompt)
-        
-        # Extract the payload or build a default one
-        if result and "payload" in result:
-            taxi_payload = result["payload"]
-            # Ensure required fields are present
-            taxi_payload["cloud"] = "gcp"
-            taxi_payload["resourceType"] = "compute"
-            taxi_payload["action"] = "create"
-            return taxi_payload
-        else:
-            # Fallback to direct mapping WITHOUT defaults
-            self.logger.warning("[GCE] Using fallback payload building")
-            filtered_dict = {k: v for k, v in vm_dict.items() if v is not None}
-            
-            # Check for required fields
-            missing_fields = []
-            required_fields = ["appEnvironment", "os", "useType", "machineType", "zone", 
-                              "lineOfBusiness", "costCenter", "project", "id"]
-            
-            for field in required_fields:
-                if field not in filtered_dict or filtered_dict[field] is None:
-                    missing_fields.append(field)
-            
-            if missing_fields:
-                self.logger.error(f"[GCE] Missing required fields for TAXI payload: {missing_fields}")
-                # Return error or trigger clarification
-                return {
-                    "success": False,
-                    "needs_clarification": True,
-                    "missing_fields": missing_fields
-                }
-            
-            taxi_payload = {
-                "cloud": "gcp",
-                "resourceType": "compute",
-                "action": "create",
-                **filtered_dict  # Use only the values we have
+        # Only map what we have; do not invent defaults
+        filtered_dict = {k: v for k, v in vm_dict.items() if v is not None}
+
+        # Check for required fields
+        required_fields = [
+            "appEnvironment", "os", "useType", "machineType", "zone",
+            "lineOfBusiness", "costCenter", "project", "id"
+        ]
+        missing_fields = [f for f in required_fields if f not in filtered_dict or filtered_dict[f] is None]
+
+        if missing_fields:
+            self.logger.info(f"[GCE] Missing fields for TAXI payload, requesting clarification: {missing_fields}")
+            questions = []
+            field_to_question = {
+                "machineType": "Which GCP machine type do you prefer (e.g., e2-small, n1-standard-1)?",
+                "zone": "Which GCP zone should we use (e.g., us-east4-a)?",
+                "project": "Which GCP project should this run in?",
+                "lineOfBusiness": "What is your line of business (RETAIL, ISTS, or EDML)?",
+                "costCenter": "What is the 5-digit cost center?",
+                "id": "What email should be used as the requestor ID?",
+                "useType": "Is this for an app or a database?",
+                "os": "Which OS image should we use (LINUX_RHEL8, LINUX_RHEL9, WINDOWS_19, WINDOWS_22)?"
             }
-            
-            # Ensure costCenter is string if present
-            if "costCenter" in taxi_payload:
-                taxi_payload["costCenter"] = str(taxi_payload["costCenter"])
-            
-            # Add subtype if NONPROD
-            if taxi_payload.get("appEnvironment") == "NONPROD" and "appEnvironmentSubtype" in filtered_dict:
-                taxi_payload["appEnvironmentSubtype"] = filtered_dict["appEnvironmentSubtype"]
-            
-            return taxi_payload
+            for f in missing_fields:
+                q = field_to_question.get(f)
+                if q:
+                    questions.append({"field": f, "question": q})
+
+            return {
+                "success": False,
+                "needs_clarification": True,
+                "missing_fields": missing_fields,
+                "questions": questions,
+                "partial_data": filtered_dict
+            }
+
+        # All required fields present; build payload directly
+        taxi_payload = {
+            "cloud": "gcp",
+            "resourceType": "compute",
+            "action": "create",
+            **filtered_dict
+        }
+
+        if "costCenter" in taxi_payload:
+            taxi_payload["costCenter"] = str(taxi_payload["costCenter"])
+
+        if taxi_payload.get("appEnvironment") == "NONPROD" and "appEnvironmentSubtype" in filtered_dict:
+            taxi_payload["appEnvironmentSubtype"] = filtered_dict["appEnvironmentSubtype"]
+
+        return taxi_payload
     
     def _provision_instance(self, taxi_payload: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -658,15 +631,15 @@ class GCESpecialistAgent(BaseAgent):
         else:
             # Mock response for testing
             self.logger.info(f"[GCE] Mock provisioning with payload: {json.dumps(taxi_payload, default=str)[:200]}")
-            # Ensure we have valid values for the response
-            machine_type = taxi_payload.get('machineType', 'e2-small')
-            zone = taxi_payload.get('zone', 'us-central1-a')
+            # Ensure we have valid values for the response (do not assume defaults)
+            machine_type = taxi_payload.get('machineType', 'unknown')
+            zone = taxi_payload.get('zone', 'unknown')
             
             # Validate machine type format
             if machine_type:
                 machine_type_clean = machine_type.replace('-', '').replace('_', '')
             else:
-                machine_type_clean = 'e2small'
+                machine_type_clean = 'unknown'
             
             return {
                 "success": True,
@@ -841,7 +814,10 @@ class GCESpecialistAgent(BaseAgent):
         self.current_step += 1
         await self.emit_progress("preparing", "Preparing TAXI payload", 70)
         taxi_payload = self._build_taxi_payload(vm_request)
-        
+        # If payload builder indicates clarification is still needed, return early
+        if isinstance(taxi_payload, dict) and taxi_payload.get("needs_clarification"):
+            return taxi_payload
+
         # Step 5: Provision instance
         self.current_step += 1
         await self.emit_progress("provisioning", "Provisioning instance", 90)

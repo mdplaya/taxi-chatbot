@@ -112,7 +112,7 @@ class MCPServer:
                 "costCenter": vm_request.get("costCenter"),
                 "sharedEmailAddress": "TAXIAutomation@CVShealth.com"
             },
-            "project": vm_request.get("project", "CORP-dev-broc-sechub-vpc"),
+            "project": vm_request.get("project"),
             "networkProject": "CVS-securehub-prod",
             "network": "VPC-aacvs-hub-trusted-nonprod-1",
             "subnet": "sn-aacvs-use4-CORP-dev-broc-sechub-vpc-testing",
@@ -133,7 +133,7 @@ class MCPServer:
                 "requestSource": "ISTS",
                 "requestor": {
                     "userType": "EMAIL",
-                    "id": vm_request.get("id", "unknown@cvs.com")
+                    "id": vm_request.get("id")
                 }
             }
         }
