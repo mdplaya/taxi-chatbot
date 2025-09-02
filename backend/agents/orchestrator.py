@@ -221,8 +221,7 @@ class OrchestratorAgent(BaseAgent):
                 if any(pattern in user_lower for pattern in patterns):
                     extracted["provider"] = provider
                     break
-            else:
-                extracted["provider"] = "gcp"  # Default to GCP
+            # Don't set a default provider - let clarification agent handle it
             
             # Enhanced OS detection with defaults
             os_detected = False
@@ -325,7 +324,7 @@ class OrchestratorAgent(BaseAgent):
                 "context": {
                     "intent": "create_compute",
                     "resource_type": "vm",
-                    "provider": extracted.get("provider", "gcp"),
+                    "provider": extracted.get("provider"),  # No default - will be None if not specified
                     "raw_request": processed_input,
                     "session_id": session_id,
                     "extracted_requirements": extracted,

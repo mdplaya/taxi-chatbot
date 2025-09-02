@@ -406,7 +406,7 @@ async def chat(request: ChatRequest):
                 # Force route to compute agent
                 compute_agent = ComputeAgent()
                 compute_context = {
-                    "provider": "gcp",  # Default to GCP
+                    "provider": None,  # Let clarification agent ask for provider
                     "raw_request": message,
                     "session_id": session_id,
                     "conversation_history": []
