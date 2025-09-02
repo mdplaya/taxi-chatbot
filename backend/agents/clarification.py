@@ -26,7 +26,7 @@ class ClarificationAgent(BaseAgent):
     Shows what's known, asks naturally, accepts corrections
     """
     
-    def __init__(self, mcp_client=None):
+    def __init__(self, mcp_client=None, context=None):
         super().__init__(
             name="Clarification",
             goal="Gather missing information through natural, friendly conversation",
@@ -36,9 +36,18 @@ class ClarificationAgent(BaseAgent):
         self.mcp = mcp_client
         self.error_correction = ErrorCorrectionSystem(self.model)
         
-        # Track conversation flow
+        # Track conversation flow - accept asked_fields from context if provided
+        asked_fields = set()
+        if context and isinstance(context, dict):
+            # Accept asked_fields from context
+            context_asked_fields = context.get('asked_fields', set())
+            if isinstance(context_asked_fields, list):
+                asked_fields = set(context_asked_fields)
+            elif isinstance(context_asked_fields, set):
+                asked_fields = context_asked_fields
+        
         self.clarification_context = {
-            "asked_fields": set(),
+            "asked_fields": asked_fields,
             "confirmed_values": {},
             "correction_count": 0,
             "conversation_style": "friendly"
@@ -275,7 +284,9 @@ class ClarificationAgent(BaseAgent):
             simplified_questions.append(simplified)
             
             # Mark field as asked
-            self.clarification_context["asked_fields"].add(q.get("field"))
+            field_name = q.get("field")
+            if field_name:
+                self.clarification_context["asked_fields"].add(field_name)
         
         # Learn from question generation
         self.memory.learned_patterns.append({
@@ -285,6 +296,9 @@ class ClarificationAgent(BaseAgent):
             "context": context.get('raw_request', ''),
             "timestamp": datetime.now().isoformat()
         })
+        
+        # Store updated asked_fields in context for persistence
+        context['asked_fields'] = list(self.clarification_context["asked_fields"])
         
         return simplified_questions
     

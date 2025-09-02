@@ -155,17 +155,25 @@ class GCESpecialistAgent(BaseAgent):
         # Get any previously extracted requirements from context
         extracted_requirements = context.get('extracted_requirements', {})
         
+        # Get business metadata from context (already extracted by Orchestrator)
+        business_metadata = context.get('business_metadata', {})
+        
         extraction_prompt = f"""
-        Extract GCE VM requirements from this request:
+        Extract TECHNICAL GCE VM requirements from this request:
         {raw_request}
         
         Context from previous analysis (use as hints if relevant):
         {json.dumps(extracted_requirements, default=str)}
         
+        Business metadata already extracted by Orchestrator (DO NOT extract these again):
+        {json.dumps(business_metadata, default=str)}
+        
         Full context: {json.dumps(context, default=str)[:500]}
         
-        IMPORTANT: If the context already contains extracted values (like appEnvironment, os, etc.), 
-        use them unless the raw request explicitly contradicts them.
+        IMPORTANT: 
+        1. Focus ONLY on technical VM configuration fields
+        2. DO NOT extract business metadata (id, costCenter, lineOfBusiness) - these are handled by Orchestrator
+        3. If the context already contains extracted values, use them unless the raw request explicitly contradicts them
         
         Apply intelligent corrections and inference:
         
@@ -212,17 +220,19 @@ class GCESpecialistAgent(BaseAgent):
         - "e2" alone → Ask which e2 type
         - Fix common typos and variations
         
-        Extract ONLY these TAXI required fields:
-        - appEnvironment: NONPROD or PROD
-        - appEnvironmentSubtype: dev/qa/test/perf (if NONPROD)
-        - lineOfBusiness: RETAIL/ISTS/EDML
-        - costCenter: 5-digit code
+        Extract ONLY these TECHNICAL fields (skip business metadata):
         - project: GCP project ID
         - zone: Full zone (e.g., us-east4-a)
         - os: LINUX_RHEL8/LINUX_RHEL9/WINDOWS_19/WINDOWS_22
         - useType: app/database
         - machineType: Valid GCP machine type
-        - id: User email
+        
+        DO NOT extract these business fields (handled by Orchestrator):
+        - appEnvironment
+        - appEnvironmentSubtype
+        - lineOfBusiness
+        - costCenter
+        - id (user email)
         
         DO NOT extract or ask about:
         - Firewall rules
@@ -234,20 +244,15 @@ class GCESpecialistAgent(BaseAgent):
         Return JSON:
         {{
             "extracted_fields": {{
-                "appEnvironment": "value or null",
-                "appEnvironmentSubtype": "value or null",
-                "lineOfBusiness": "value or null",
-                "costCenter": "value or null",
                 "project": "value or null",
                 "zone": "value or null",
                 "os": "value or null",
                 "useType": "value or null",
-                "machineType": "value or null",
-                "id": "value or null"
+                "machineType": "value or null"
             }},
             "corrections_applied": ["list of corrections"],
-            "missing_fields": ["list of required fields not found"],
-            "clarifications_needed": ["specific questions for missing info"],
+            "missing_fields": ["list of TECHNICAL fields not found"],
+            "clarifications_needed": ["specific questions for missing TECHNICAL info only"],
             "confidence": 0.0-1.0
         }}
         
@@ -262,6 +267,16 @@ class GCESpecialistAgent(BaseAgent):
         
         result = self._llm_reason(extraction_prompt)
         
+        # Merge business metadata from context into the result
+        if business_metadata:
+            if not result.get("extracted_fields"):
+                result["extracted_fields"] = {}
+            
+            # Add business metadata fields (these won't be in our extraction since we focus on technical fields)
+            for key, value in business_metadata.items():
+                if value is not None:
+                    result["extracted_fields"][key] = value
+        
         # Merge context's extracted_requirements into the extracted_fields
         if extracted_requirements:
             if not result.get("extracted_fields"):
@@ -269,7 +284,7 @@ class GCESpecialistAgent(BaseAgent):
             
             # Use context values for any fields that are provided
             for key, value in extracted_requirements.items():
-                if value is not None and key in ["environment", "appEnvironmentSubtype", "os", "provider", "use_type"]:
+                if value is not None:
                     # Map the field names appropriately
                     if key == "environment":
                         result["extracted_fields"]["appEnvironment"] = value
@@ -277,21 +292,30 @@ class GCESpecialistAgent(BaseAgent):
                         result["extracted_fields"]["useType"] = value
                     else:
                         result["extracted_fields"][key] = value
-                        
-            # Remove questions for fields we already have from context
-            if result.get("clarifications_needed"):
-                filtered_questions = []
-                for question in result["clarifications_needed"]:
-                    # Check if this question is about a field we already have
-                    if isinstance(question, dict):
-                        field = question.get("field", "")
-                        if field not in ["appEnvironment", "appEnvironmentSubtype"] or not result["extracted_fields"].get(field):
-                            filtered_questions.append(question)
-                    elif isinstance(question, str):
-                        # Simple string questions - check if it's asking about environment
-                        if "environment" not in question.lower() and "prod" not in question.lower():
-                            filtered_questions.append(question)
-                result["clarifications_needed"] = filtered_questions
+        
+        # Filter out questions for fields we already have (including business metadata)
+        if result.get("clarifications_needed"):
+            known_fields = set(result["extracted_fields"].keys())
+            filtered_questions = []
+            
+            for question in result["clarifications_needed"]:
+                # Check if this question is about a field we already have
+                if isinstance(question, dict):
+                    field = question.get("field", "")
+                    # Skip if we already have this field
+                    if field not in known_fields:
+                        filtered_questions.append(question)
+                elif isinstance(question, str):
+                    # Skip questions about fields we already have
+                    skip = False
+                    for known_field in known_fields:
+                        if known_field.lower() in question.lower():
+                            skip = True
+                            break
+                    if not skip:
+                        filtered_questions.append(question)
+            
+            result["clarifications_needed"] = filtered_questions
         
         return result
     

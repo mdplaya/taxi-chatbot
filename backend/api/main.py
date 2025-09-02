@@ -345,14 +345,18 @@ async def chat(request: ChatRequest):
                 else:
                     # Handle provisioning error
                     if provision_result.get("needs_clarification"):
-                        clarification_agent = ClarificationAgent()
+                        # Get asked_fields from session metadata if available
+                        asked_fields = session.metadata.get('asked_fields', []) if hasattr(session, 'metadata') else []
+                        context = {
+                            'raw_request': request.message,
+                            'conversation_history': session.messages if hasattr(session, 'messages') else [],
+                            'session_id': session_id,
+                            'asked_fields': asked_fields
+                        }
+                        clarification_agent = ClarificationAgent(context=context)
                         clarification_result = await clarification_agent.get_clarifications(
                             session.vm_request,
-                            {
-                                'raw_request': request.message,
-                                'conversation_history': session.messages if hasattr(session, 'messages') else [],
-                                'session_id': session_id
-                            }
+                            context
                         )
                         
                         return ChatResponse(
@@ -437,10 +441,21 @@ async def chat(request: ChatRequest):
                     missing = session.vm_request.get_missing_fields()
                     
                     if missing:
-                        clarification_agent = ClarificationAgent()
+                        # Get asked_fields from session metadata if available
+                        asked_fields = session.metadata.get('asked_fields', []) if hasattr(session, 'metadata') else []
+                        context = {
+                            'raw_request': message,
+                            'session_id': session_id,
+                            'asked_fields': asked_fields
+                        }
+                        clarification_agent = ClarificationAgent(context=context)
                         questions = await clarification_agent.generate_questions(
                             session.vm_request, missing
                         )
+                        
+                        # Store updated asked_fields in session
+                        if hasattr(session, 'metadata'):
+                            session.metadata['asked_fields'] = context.get('asked_fields', [])
                         
                         return ChatResponse(
                             response="I detected you want to create a VM. I need some additional information:",
@@ -557,12 +572,23 @@ async def answer_clarification(request: AnswerRequest):
     else:
         vm_request_obj = current_vm
     
+    # Get asked_fields from session metadata
+    asked_fields = session.metadata.get('asked_fields', []) if hasattr(session, 'metadata') else []
+    context = {
+        'session_id': request.session_id,
+        'asked_fields': asked_fields
+    }
+    
     # Update VM request with answers
-    clarification_agent = ClarificationAgent()
+    clarification_agent = ClarificationAgent(context=context)
     updated_vm_request = await clarification_agent.process_answers(
         vm_request_obj,
         request.answers
     )
+    
+    # Store updated asked_fields in session metadata
+    if hasattr(session, 'metadata'):
+        session.metadata['asked_fields'] = context.get('asked_fields', [])
     
     # Update session with new VM request
     session.current_vm_request = updated_vm_request.dict() if hasattr(updated_vm_request, 'dict') else updated_vm_request
@@ -578,14 +604,10 @@ async def answer_clarification(request: AnswerRequest):
     current_mode = llm_manager.get_mode()
     
     # Check if we have all required fields now
+    # Pass the context with asked_fields to clarification agent
     clarification_result = await clarification_agent.get_clarifications(
         updated_vm_request,
-        {
-            'raw_request': session.conversation_history[0].content if session.conversation_history else '',
-            'conversation_history': [msg.dict() for msg in session.conversation_history] if hasattr(session, 'conversation_history') else [],
-            'session_id': request.session_id,
-            'context_type': 'answer_followup'
-        }
+        context  # Use the context that already has asked_fields
     )
     
     if clarification_result["complete"]:

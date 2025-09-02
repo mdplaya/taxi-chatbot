@@ -164,6 +164,9 @@ class ChatSession(BaseModel):
     current_step: Optional[str] = None
     last_progress_update: Optional[datetime] = None
     
+    # Metadata for tracking additional context (like asked_fields)
+    metadata: Dict[str, Any] = {}
+    
     def add_progress(self, agent: str, step: str, message: str, 
                     status: str = "in_progress", percentage: Optional[int] = None) -> ProgressStep:
         """Add a progress step to the session"""

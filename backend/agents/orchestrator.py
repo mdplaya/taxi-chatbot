@@ -206,15 +206,42 @@ class OrchestratorAgent(BaseAgent):
                 'onprem': ['on-prem', 'on prem', 'onprem', 'datacenter', 'vmware']
             }
             
-            # Enhanced OS detection
+            # Enhanced OS detection - use correct enum values
             os_patterns = {
-                'windows': ['windows', 'win', 'w2k', 'win2022', 'win2019'],
-                'linux': ['linux', 'ubuntu', 'centos', 'debian', 'fedora'],
-                'rhel': ['rhel', 'redhat', 'red hat', 'red-hat']
+                'WINDOWS_22': ['windows 2022', 'win2022', 'win22', 'windows 22'],
+                'WINDOWS_19': ['windows 2019', 'win2019', 'win19', 'windows 19'],
+                'LINUX_RHEL9': ['rhel9', 'rhel 9', 'red hat 9', 'redhat 9'],
+                'LINUX_RHEL8': ['rhel8', 'rhel 8', 'red hat 8', 'redhat 8']
             }
             
             # Extract all possible requirements
             extracted = {}
+            
+            # Extract business metadata fields first
+            import re
+            
+            # Extract email (requestor.id)
+            email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+            email_match = re.search(email_pattern, processed_input)
+            if email_match:
+                extracted["id"] = email_match.group(0)
+            
+            # Extract cost center (5-digit number)
+            cost_center_pattern = r'\b\d{5}\b'
+            cost_center_match = re.search(cost_center_pattern, processed_input)
+            if cost_center_match:
+                extracted["costCenter"] = cost_center_match.group(0)
+            
+            # Extract line of business
+            lob_patterns = {
+                'RETAIL': ['retail', 'storefront', 'store', 'shop', 'commerce', 'sales'],
+                'ISTS': ['ists', 'it services', 'technology services', 'it support', 'tech support'],
+                'EDML': ['edml', 'data management', 'data lake', 'analytics', 'data platform']
+            }
+            for lob, patterns in lob_patterns.items():
+                if any(pattern in user_lower for pattern in patterns):
+                    extracted["lineOfBusiness"] = lob
+                    break
             
             # Detect provider
             for provider, patterns in provider_patterns.items():
@@ -231,27 +258,24 @@ class OrchestratorAgent(BaseAgent):
                     os_detected = True
                     break
             
-            # Apply OS defaults if not detected
+            # Apply OS defaults if not detected (check for generic terms)
             if not os_detected:
-                if 'linux' in user_lower:
-                    # Check for specific distros
-                    if 'rhel' in user_lower or 'red hat' in user_lower:
-                        if '8' in user_lower:
-                            extracted["os"] = "LINUX_RHEL8"
-                        elif '9' in user_lower:
-                            extracted["os"] = "LINUX_RHEL9"
-                        else:
-                            extracted["os"] = "LINUX_RHEL9"  # Default RHEL version
-                    elif not any(x in user_lower for x in ['ubuntu', 'centos', 'debian']):
-                        extracted["os"] = "LINUX_RHEL9"  # Default Linux
-                elif 'windows' in user_lower:
-                    if '2019' in user_lower or '19' in user_lower:
+                if 'windows' in user_lower:
+                    # Check for specific versions first
+                    if '2019' in user_lower or 'win19' in user_lower:
                         extracted["os"] = "WINDOWS_19"
-                    elif '2022' in user_lower or '22' in user_lower:
+                    elif '2022' in user_lower or 'win22' in user_lower:
                         extracted["os"] = "WINDOWS_22"
                     else:
                         extracted["os"] = "WINDOWS_22"  # Default Windows
-            
+                elif 'linux' in user_lower or 'rhel' in user_lower or 'red hat' in user_lower:
+                    # Check for specific versions
+                    if '8' in user_lower:
+                        extracted["os"] = "LINUX_RHEL8"
+                    elif '9' in user_lower:
+                        extracted["os"] = "LINUX_RHEL9"
+                    else:
+                        extracted["os"] = "LINUX_RHEL9"  # Default Linux
             # Comprehensive environment detection with subtype
             env_keywords = {
                 'PROD': ['production', 'prod', 'live', 'operational', 'operations', 
@@ -296,7 +320,7 @@ class OrchestratorAgent(BaseAgent):
             for pattern in machine_patterns:
                 if pattern in user_lower:
                     # Try to extract the full machine type
-                    machine_match = re.search(f'{pattern}\w+', user_lower)
+                    machine_match = re.search(f'{pattern}\\w+', user_lower)
                     if machine_match:
                         extracted["machine_type"] = machine_match.group(0)
                     break
@@ -312,27 +336,39 @@ class OrchestratorAgent(BaseAgent):
                 # Default use type if unclear
                 extracted["use_type"] = "app"
             
-            # Detect line of business
-            lob_patterns = ['retail', 'banking', 'insurance', 'healthcare', 'finance', 'manufacturing']
-            for lob in lob_patterns:
-                if lob in user_lower:
-                    extracted["line_of_business"] = lob
-                    break
+            # Project detection (if mentioned)
+            if 'project' in user_lower:
+                # Try to extract project name (word after 'project')
+                project_match = re.search(r'project\s+(\S+)', user_lower)
+                if project_match:
+                    extracted["project"] = project_match.group(1)
+            
+            # Separate business metadata from technical fields
+            business_metadata = {}
+            technical_fields = {}
+            
+            for key, value in extracted.items():
+                if key in ['id', 'costCenter', 'lineOfBusiness', 'environment', 'appEnvironmentSubtype']:
+                    business_metadata[key] = value
+                else:
+                    technical_fields[key] = value
             
             routing_decision = {
                 "next_agent": "compute",
                 "context": {
                     "intent": "create_compute",
                     "resource_type": "vm",
-                    "provider": extracted.get("provider"),  # No default - will be None if not specified
+                    "provider": technical_fields.get("provider"),  # No default - will be None if not specified
                     "raw_request": processed_input,
                     "session_id": session_id,
                     "extracted_requirements": extracted,
+                    "business_metadata": business_metadata,  # Pass business metadata separately
+                    "technical_fields": technical_fields,  # Pass technical fields separately
                     "missing_info": [],
                     "conversation_history": [],
                     "confidence": 0.95
                 },
-                "reasoning": f"VM request detected with keywords - routing to compute agent. Extracted: {list(extracted.keys())}",
+                "reasoning": f"VM request detected with keywords - routing to compute agent. Extracted business metadata: {list(business_metadata.keys())}, technical: {list(technical_fields.keys())}",
                 "mode": "fast_path"
             }
             reasoning_chain = []
@@ -400,22 +436,33 @@ class OrchestratorAgent(BaseAgent):
         if is_simple:
             # Simplified prompt for simple requests with VM-specific examples
             routing_prompt = f"""
-            Route this request to the correct agent:
+            Route this request to the correct agent and extract business metadata:
             User: {user_input}
             
             Available agents: {list(self.available_agents.keys())}
             
             Examples:
             - "I want a VM" -> {{"resource_type": "vm", "next_agent": "compute", "confidence": 0.95}}
-            - "Create a GCP instance" -> {{"resource_type": "vm", "next_agent": "compute", "confidence": 0.95}}
-            - "Deploy a server" -> {{"resource_type": "vm", "next_agent": "compute", "confidence": 0.9}}
-            - "Need a database" -> {{"resource_type": "database", "next_agent": "database", "confidence": 0.9}}
+            - "Create a GCP instance for retail" -> {{"resource_type": "vm", "next_agent": "compute", "lineOfBusiness": "RETAIL", "confidence": 0.95}}
+            - "Deploy a server with cost center 12345" -> {{"resource_type": "vm", "next_agent": "compute", "costCenter": "12345", "confidence": 0.9}}
             
-            Detect resource type and return JSON:
+            Extract business metadata if present:
+            - Email addresses -> "id"
+            - 5-digit numbers -> "costCenter"  
+            - retail/ISTS/EDML mentions -> "lineOfBusiness"
+            - prod/nonprod mentions -> "appEnvironment"
+            
+            Return JSON:
             {{
                 "resource_type": "vm|database|network|storage|other",
                 "next_agent": "agent_name",
-                "confidence": 0.0-1.0
+                "confidence": 0.0-1.0,
+                "business_metadata": {{
+                    "id": "email if found",
+                    "costCenter": "5-digit if found",
+                    "lineOfBusiness": "RETAIL|ISTS|EDML if found",
+                    "appEnvironment": "PROD|NONPROD if found"
+                }}
             }}
             
             IMPORTANT: For any VM, server, instance, or compute request, route to "compute" agent.
@@ -442,6 +489,13 @@ class OrchestratorAgent(BaseAgent):
             - "Set up a Windows/Linux machine"
             - References to GCP/AWS/Azure compute resources
             
+            Extract business metadata if present:
+            - Email addresses (e.g., user@company.com) -> "id"
+            - 5-digit numbers (e.g., 12345) -> "costCenter"
+            - Line of business: retail/ISTS/EDML -> "lineOfBusiness"
+            - Environment: production/prod/nonprod/dev/test -> "appEnvironment"
+            - Environment subtype: dev/qa/test/perf -> "appEnvironmentSubtype"
+            
             Respond in JSON:
             {{
                 "intent": "brief description",
@@ -449,7 +503,14 @@ class OrchestratorAgent(BaseAgent):
                 "provider": "gcp|aws|azure|unclear",
                 "confidence": 0.0-1.0,
                 "next_agent": "agent_name",
-                "reasoning": "brief explanation"
+                "reasoning": "brief explanation",
+                "business_metadata": {{
+                    "id": "email if found",
+                    "costCenter": "5-digit if found",
+                    "lineOfBusiness": "RETAIL|ISTS|EDML if found",
+                    "appEnvironment": "PROD|NONPROD if found",
+                    "appEnvironmentSubtype": "dev|qa|test|perf if found"
+                }}
             }}
             
             IMPORTANT: Default to "compute" agent for ANY request mentioning VMs, servers, instances, or compute resources.
@@ -469,6 +530,16 @@ class OrchestratorAgent(BaseAgent):
         # Build routing response
         next_agent = result.get("next_agent", "compute")  # Default to compute instead of clarification
         
+        # Extract business metadata from result
+        business_metadata = result.get("business_metadata", {})
+        extracted_requirements = result.get("extracted_requirements", {})
+        
+        # Merge business metadata into extracted requirements
+        if business_metadata:
+            for key, value in business_metadata.items():
+                if value and value not in ["email if found", "5-digit if found", "RETAIL|ISTS|EDML if found", "PROD|NONPROD if found", "dev|qa|test|perf if found"]:
+                    extracted_requirements[key] = value
+        
         # Learn from this routing for future
         self.memory.learned_patterns.append({
             "input_pattern": user_input[:100],
@@ -486,7 +557,8 @@ class OrchestratorAgent(BaseAgent):
                 "provider": result.get("provider"),
                 "raw_request": user_input,
                 "session_id": session_id,
-                "extracted_requirements": result.get("extracted_requirements", {}),
+                "extracted_requirements": extracted_requirements,
+                "business_metadata": business_metadata,  # Pass business metadata separately
                 "missing_info": result.get("missing_info", []),
                 "conversation_history": self._get_conversation_history(session_id),
                 "confidence": result.get("confidence", 0.5)
