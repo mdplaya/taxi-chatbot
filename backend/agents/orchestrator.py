@@ -387,8 +387,6 @@ class OrchestratorAgent(BaseAgent):
                     logger.info("[Orchestrator] Applied default OS: LINUX_RHEL9 for generic Linux")
                 elif 'windows' in user_lower and extracted["os"] == "WINDOWS_22":
                     logger.info("[Orchestrator] Applied default OS: WINDOWS_22 for generic Windows")
-                elif 'server' in user_lower and extracted["os"] == "LINUX_RHEL9":
-                    logger.info("[Orchestrator] Applied default OS: LINUX_RHEL9 for generic server")
         else:
             # Use reasoning engine for complex requests
             routing_decision, reasoning_chain = await self.reasoning_engine.reason(
