@@ -24,6 +24,7 @@ from agents.gce_specialist import GCESpecialistAgent
 from models.taxi_models import VMRequest, ChatSession, ProgressStep
 from models.agent_session import AgentSession, ConversationState
 from utils.llm_manager import llm_manager
+from utils.llm_manager import set_llm_debug
 from utils.fields import CANONICAL_VM_FIELDS, canonical_vm_fields, sanitize_answers
 from utils.progress_manager import progress_manager
 from utils.valkey_manager import valkey_manager
@@ -292,7 +293,8 @@ async def status():
     }
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
+async def chat(request: ChatRequest, raw_request: Request):
+    _set_llm_debug_from_request(raw_request)
     """
     Main chat endpoint - processes user messages through agent pipeline
     """
@@ -636,7 +638,8 @@ async def chat(request: ChatRequest):
         )
 
 @app.post("/answer", response_model=ChatResponse)
-async def answer_clarification(request: AnswerRequest):
+async def answer_clarification(request: AnswerRequest, raw_request: Request):
+    _set_llm_debug_from_request(raw_request)
     """
     Handle clarification answers from the user
     """
@@ -1116,7 +1119,8 @@ class FeedbackRequest(BaseModel):
     details: Dict[str, Any]
 
 @app.post("/correct")
-async def correct_field(request: CorrectionRequest):
+async def correct_field(request: CorrectionRequest, raw_request: Request):
+    _set_llm_debug_from_request(raw_request)
     """Handle inline field corrections"""
     try:
         # Load session from Valkey
@@ -1155,7 +1159,8 @@ async def correct_field(request: CorrectionRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/confirm")
-async def confirm_submission(request: ConfirmRequest):
+async def confirm_submission(request: ConfirmRequest, raw_request: Request):
+    _set_llm_debug_from_request(raw_request)
     """Confirm before final submission"""
     try:
         # Load session from Valkey
@@ -1218,7 +1223,8 @@ async def confirm_submission(request: ConfirmRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/learn")
-async def learn_from_feedback(request: FeedbackRequest):
+async def learn_from_feedback(request: FeedbackRequest, raw_request: Request):
+    _set_llm_debug_from_request(raw_request)
     """Learn from user feedback"""
     try:
         # Load session from Valkey
@@ -1471,3 +1477,11 @@ async def shutdown_event():
 if __name__ == "__main__":
     import uvicorn as uv
     uv.run(app, host="0.0.0.0", port=8000, reload=True)
+def _set_llm_debug_from_request(request: Request) -> None:
+    """Enable LLM debug logging for this request if debug=true is present."""
+    try:
+        debug_param = request.query_params.get('debug')
+        enabled = str(debug_param).lower() in {"1", "true", "yes"}
+        set_llm_debug(enabled)
+    except Exception:
+        set_llm_debug(False)

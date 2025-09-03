@@ -410,7 +410,13 @@ class ErrorCorrectionSystem:
                 "temperature": 1.0,
                 "response_format": {"type": "json_object"}
             }
-            logger.info(f"[OpenAI Request] {json.dumps(payload, default=str)[:4000]}")
+            try:
+                from utils.llm_manager import is_llm_debug_enabled
+                if is_llm_debug_enabled():
+                    logger.info("[OpenAI Request]")
+                    logger.info(json.dumps(payload, default=str, indent=2, ensure_ascii=False))
+            except Exception:
+                pass
             response = self.llm.chat.completions.create(**payload)
             
             return json.loads(response.choices[0].message.content)

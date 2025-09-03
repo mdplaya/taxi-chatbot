@@ -6,6 +6,7 @@ import os
 import time
 import asyncio
 from typing import Optional, Literal, Any, Callable, Dict
+import contextvars
 from functools import wraps
 import logging
 
@@ -182,3 +183,15 @@ class LLMManager:
 
 # Global instance
 llm_manager = LLMManager()
+
+# Context-scoped debug flag used to control OpenAI payload logging
+_LLM_DEBUG: contextvars.ContextVar[bool] = contextvars.ContextVar("LLM_DEBUG", default=False)
+
+def set_llm_debug(enabled: bool) -> None:
+    _LLM_DEBUG.set(bool(enabled))
+
+def is_llm_debug_enabled() -> bool:
+    try:
+        return bool(_LLM_DEBUG.get())
+    except Exception:
+        return False
