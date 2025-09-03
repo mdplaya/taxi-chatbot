@@ -30,7 +30,8 @@ def test_process_answers_with_enums():
     
     # Check enum fields are properly converted
     assert isinstance(updated.appEnvironment, AppEnvironment)
-    assert updated.appEnvironment == AppEnvironment.PROD
+    # When a NONPROD subtype is provided, env should be NONPROD
+    assert updated.appEnvironment == AppEnvironment.NONPROD
     assert isinstance(updated.appEnvironmentSubtype, AppEnvironmentSubtype)
     assert updated.appEnvironmentSubtype == AppEnvironmentSubtype.DEV
     assert isinstance(updated.os, OS)

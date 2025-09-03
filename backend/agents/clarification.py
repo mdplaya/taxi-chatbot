@@ -528,7 +528,14 @@ class ClarificationAgent(BaseAgent):
             if field == 'machineType':
                 # Normalize to enum-friendly lowercase with dashes
                 return val.lower().replace('_', '-').replace(' ', '-')
-            if field in {'zone', 'project', 'costCenter', 'id'}:
+            if field == 'id':
+                # Simple email validation without regex
+                if isinstance(value, str):
+                    v = value.strip()
+                    if '@' in v and '.' in v.split('@')[-1] and ' ' not in v and len(v) >= 5:
+                        return v
+                return None
+            if field in {'zone', 'project', 'costCenter'}:
                 return value
 
         return normalized
