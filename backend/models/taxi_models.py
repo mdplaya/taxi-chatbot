@@ -3,6 +3,7 @@ import re
 from typing import Optional, List, Literal, Dict, Any
 from enum import Enum
 from datetime import datetime
+from utils.gcp_catalog import is_valid_machine_type
 
 class AppEnvironment(str, Enum):
     NONPROD = "NONPROD"
@@ -30,30 +31,14 @@ class UseType(str, Enum):
     DATABASE = "database"
 
 class MachineType(str, Enum):
-    # E2 Series (Cost Optimized)
-    E2_MICRO = "e2-micro"
+    """
+    Deprecated narrow enum retained for backward imports in tests.
+    Use free-form validated string on VMRequest.machineType instead.
+    """
+    # Keep a small subset for backwards compatibility; not used for validation
     E2_SMALL = "e2-small"
-    E2_MEDIUM = "e2-medium"
-    E2_STANDARD_2 = "e2-standard-2"
-    E2_STANDARD_4 = "e2-standard-4"
-    E2_STANDARD_8 = "e2-standard-8"
-    
-    # N1 Series (Previous Gen)
     N1_STANDARD_1 = "n1-standard-1"
-    N1_STANDARD_2 = "n1-standard-2"
-    N1_STANDARD_4 = "n1-standard-4"
-    N1_STANDARD_8 = "n1-standard-8"
-    
-    # N2 Series (Balanced)
-    N2_STANDARD_2 = "n2-standard-2"
-    N2_STANDARD_4 = "n2-standard-4"
-    N2_STANDARD_8 = "n2-standard-8"
-    N2_HIGHMEM_2 = "n2-highmem-2"
-    N2_HIGHMEM_4 = "n2-highmem-4"
-    
-    # C2 Series (Compute Optimized)
     C2_STANDARD_4 = "c2-standard-4"
-    C2_STANDARD_8 = "c2-standard-8"
 
 class VMRequest(BaseModel):
     """User's VM request with optional fields"""
@@ -76,7 +61,8 @@ class VMRequest(BaseModel):
     )
     os: Optional[OS] = None
     useType: Optional[UseType] = None
-    machineType: Optional[MachineType] = None
+    # Use validated free-form string to support full GCP catalog
+    machineType: Optional[str] = None
     id: Optional[EmailStr] = None  # Email address
     
     @field_validator('costCenter')
@@ -112,6 +98,15 @@ class VMRequest(BaseModel):
             raise ValueError('Project ID cannot contain consecutive hyphens')
         # Already covered by pattern: start letter, end alnum, length bounds
         return v
+
+    @field_validator('machineType')
+    def validate_machine_type(cls, v):
+        if v is None:
+            return v
+        mt = str(v).strip()
+        if not is_valid_machine_type(mt):
+            raise ValueError('Invalid GCP machine type')
+        return mt
     
     def get_missing_fields(self) -> List[str]:
         """Return list of required fields that are None"""

@@ -367,7 +367,7 @@ class ClarificationAgent(BaseAgent):
         """
         from models.taxi_models import (
             AppEnvironment, AppEnvironmentSubtype, LineOfBusiness,
-            OS, UseType, MachineType
+            OS, UseType
         )
         
         explicit_app_env: Optional[str] = None
@@ -403,7 +403,8 @@ class ClarificationAgent(BaseAgent):
                     elif field == "useType":
                         setattr(vm_request, field, UseType(normalized))
                     elif field == "machineType":
-                        setattr(vm_request, field, MachineType(normalized))
+                        # Accept any supported GCP machine type string
+                        setattr(vm_request, field, normalized)
                     else:
                         setattr(vm_request, field, normalized)
                     

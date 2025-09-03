@@ -4,7 +4,7 @@ NO hardcoded validation rules - all through intelligent reasoning
 """
 
 from typing import Dict, Any, List, Optional
-from models.taxi_models import VMRequest, MachineType
+from models.taxi_models import VMRequest
 from pydantic import ValidationError
 import logging
 import json

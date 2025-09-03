@@ -78,7 +78,7 @@ def test_to_taxi_payload_with_enums():
     assert payload["resourceMetadata"]["appEnvironment"] == "PROD"
     assert payload["os"] == "LINUX_RHEL8"
     assert payload["useType"] == "app"
-    assert payload["machineType"] == "n1-STANDARD-1"
+    assert payload["machineType"] == "n1-standard-1"
     
     print("✅ test_to_taxi_payload_with_enums passed")
 

@@ -4,7 +4,7 @@ NO pattern matching - all decisions through LLM
 """
 
 from typing import Dict, Any, List, Optional
-from models.taxi_models import VMRequest, AppEnvironment, OS, UseType, MachineType, LineOfBusiness, AppEnvironmentSubtype
+from models.taxi_models import VMRequest, AppEnvironment, OS, UseType, LineOfBusiness, AppEnvironmentSubtype
 import logging
 import json
 from datetime import datetime
