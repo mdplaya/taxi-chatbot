@@ -606,7 +606,7 @@ class BaseAgent(ABC):
                 # Reflect on outcome
                 self.current_step += 1
                 await self.emit_progress("reflecting", "Evaluating results and learning", 90)
-                reflection = self.reflect(action, outcome)
+                reflection = await self.reflect(action, outcome)
                 
                 # Add to short-term memory
                 self.memory.short_term.append({

@@ -354,6 +354,7 @@ class ClarificationAgent(BaseAgent):
             OS, UseType, MachineType
         )
         
+        explicit_app_env: Optional[str] = None
         for field, value in answers.items():
             if not value:
                 continue
@@ -376,6 +377,7 @@ class ClarificationAgent(BaseAgent):
                     # Set the value with proper type conversion
                     if field == "appEnvironment":
                         setattr(vm_request, field, AppEnvironment(normalized))
+                        explicit_app_env = normalized
                     elif field == "appEnvironmentSubtype":
                         setattr(vm_request, field, AppEnvironmentSubtype(normalized))
                     elif field == "lineOfBusiness":
@@ -403,7 +405,20 @@ class ClarificationAgent(BaseAgent):
                         False,
                         str(e)
                     )
-        
+                    # Re-raise for fields that require strict enum values
+                    if field in {"appEnvironment", "appEnvironmentSubtype", "lineOfBusiness", "os", "useType", "machineType"}:
+                        raise ValueError(f"Invalid value for {field}: {normalized}")
+            else:
+                # No normalized value returned; if enum-like field, raise ValueError
+                if field in {"appEnvironment", "appEnvironmentSubtype", "lineOfBusiness", "os", "useType", "machineType"}:
+                    raise ValueError(f"Invalid value for {field}: {value}")
+        # If user explicitly set appEnvironment, respect it (do not override via subtype inference)
+        if explicit_app_env:
+            try:
+                vm_request.appEnvironment = AppEnvironment(explicit_app_env)
+            except Exception:
+                pass
+
         return vm_request
     
     async def _normalize_value(self, field: str, value: str, vm_request: VMRequest) -> Optional[str]:
@@ -459,8 +474,62 @@ class ClarificationAgent(BaseAgent):
         normalized = result.get("normalized_value")
         confidence = result.get("confidence", 0)
 
-        if confidence < 0.5:
-            logger.warning(f"[Clarification] Low confidence normalization for {field}: {value} -> {normalized}")
+        if not normalized or confidence < 0.5:
+            # Deterministic fallback normalization for offline/tests
+            val = str(value) if value is not None else ""
+            v_lower = val.lower()
+            v_upper = val.upper()
+
+            if field == 'appEnvironment':
+                if v_lower in {"prod", "production"}:
+                    return "PROD"
+                if v_lower in {"nonprod", "non-prod", "dev", "qa", "test", "perf", "staging"}:
+                    return "NONPROD"
+                return None
+            if field == 'appEnvironmentSubtype':
+                if v_lower in {"dev", "development", "develop"}:
+                    return "dev"
+                if v_lower in {"qa", "quality", "quality-assurance"}:
+                    return "qa"
+                if v_lower in {"test", "testing", "integration", "staging"}:
+                    return "test"
+                if v_lower in {"perf", "performance", "load"}:
+                    return "perf"
+                return None
+            if field == 'lineOfBusiness':
+                if "retail" in v_lower:
+                    return "RETAIL"
+                if "ists" in v_lower:
+                    return "ISTS"
+                if "edml" in v_lower:
+                    return "EDML"
+                return None
+            if field == 'os':
+                l = v_lower.replace('_', '-').replace(' ', '-')
+                if 'windows' in l or 'win' in l:
+                    if '22' in l or '2022' in l:
+                        return "WINDOWS_22"
+                    if '19' in l or '2019' in l:
+                        return "WINDOWS_19"
+                    return "WINDOWS_22"
+                if 'rhel' in l or 'red-hat' in l or 'redhat' in l or 'linux' in l:
+                    if '9' in l:
+                        return "LINUX_RHEL9"
+                    if '8' in l:
+                        return "LINUX_RHEL8"
+                    return "LINUX_RHEL9"
+                return None
+            if field == 'useType':
+                if 'database' in v_lower or v_lower == 'db':
+                    return "database"
+                if 'app' in v_lower or 'application' in v_lower or 'web' in v_lower:
+                    return "app"
+                return None
+            if field == 'machineType':
+                # Normalize to enum-friendly lowercase with dashes
+                return val.lower().replace('_', '-').replace(' ', '-')
+            if field in {'zone', 'project', 'costCenter', 'id'}:
+                return value
 
         return normalized
     

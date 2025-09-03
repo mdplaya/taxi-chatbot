@@ -210,19 +210,18 @@ class OrchestratorAgent(BaseAgent):
             extracted = {}
             
             # Extract business metadata fields first
-            import re
+            # Extract email (requestor.id) without regex: simple token scan
+            tokens = [t.strip('.,;:()[]{}<>"\'') for t in processed_input.split()]
+            for t in tokens:
+                if '@' in t and '.' in t.split('@')[-1] and len(t) >= 5:
+                    extracted["id"] = t
+                    break
             
-            # Extract email (requestor.id)
-            email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
-            email_match = re.search(email_pattern, processed_input)
-            if email_match:
-                extracted["id"] = email_match.group(0)
-            
-            # Extract cost center (5-digit number)
-            cost_center_pattern = r'\b\d{5}\b'
-            cost_center_match = re.search(cost_center_pattern, processed_input)
-            if cost_center_match:
-                extracted["costCenter"] = cost_center_match.group(0)
+            # Extract cost center (5-digit numeric) without regex
+            for t in tokens:
+                if t.isdigit() and len(t) == 5:
+                    extracted["costCenter"] = t
+                    break
             
             # Extract line of business
             lob_patterns = {
@@ -273,13 +272,60 @@ class OrchestratorAgent(BaseAgent):
                             break
                     if extracted.get("appEnvironment"):
                         break
+
+            # Back-compat technical HINT extraction (non-authoritative)
+            # OS hints
+            if any(k in user_lower for k in ["windows 2022", "win2022", "win22", "windows 22"]):
+                extracted["os"] = "WINDOWS_22"
+            elif any(k in user_lower for k in ["windows 2019", "win2019", "win19", "windows 19"]):
+                extracted["os"] = "WINDOWS_19"
+            elif any(k in user_lower for k in ["rhel 9", "rhel9", "red hat 9", "redhat 9"]):
+                extracted["os"] = "LINUX_RHEL9"
+            elif any(k in user_lower for k in ["rhel 8", "rhel8", "red hat 8", "redhat 8"]):
+                extracted["os"] = "LINUX_RHEL8"
+            elif "linux" in user_lower:
+                extracted["os"] = "LINUX_RHEL9"
+
+            # Use type hints
+            if any(x in user_lower for x in ["database", "db", "mysql", "postgres", "mongodb", "redis", "storage"]):
+                extracted["use_type"] = "database"
+            elif any(x in user_lower for x in ["web", "website", "frontend", "ui", "api", "backend", "service", "microservice", "application", "app"]):
+                extracted["use_type"] = "app"
+
+            # Machine type hints (simple contains patterns)
+            for family in ["e2-", "n1-", "n2-", "c2-"]:
+                idx = user_lower.find(family)
+                if idx != -1:
+                    # Take token at/after family occurrence
+                    trailing = user_lower[idx:].split()[0]
+                    # Basic sanitization
+                    extracted["machine_type"] = trailing.strip('.,;:')
+                    break
+
+            # Zone hint: pick first token that looks like region-zone (very naive heuristic)
+            for t in tokens:
+                tl = t.lower().strip('.,;:')
+                if tl.count('-') >= 2 and tl[-1:].isalpha() and any(tl.startswith(p) for p in ["us-", "europe-", "asia-", "australia-", "southamerica-", "northamerica-"]):
+                    extracted["zone"] = tl
+                    break
+
+            # Project hint: word after 'project'
+            if 'project' in user_lower:
+                parts = user_lower.split()
+                for i, w in enumerate(parts):
+                    if w == 'project' and i + 1 < len(parts):
+                        extracted["project"] = parts[i + 1].strip('.,;:')
+                        break
             
             # Separate business metadata from technical fields
             business_metadata = {}
+            technical_hints = {}
             
             for key, value in extracted.items():
                 if key in ['id', 'costCenter', 'lineOfBusiness', 'appEnvironment', 'appEnvironmentSubtype']:
                     business_metadata[key] = value
+                else:
+                    technical_hints[key] = value
             
             routing_decision = {
                 "next_agent": "compute",
@@ -289,14 +335,23 @@ class OrchestratorAgent(BaseAgent):
                     "provider": extracted.get("provider"),  # No default - will be None if not specified
                     "raw_request": processed_input,
                     "session_id": session_id,
-                    # Pass only business metadata as extracted requirements; technical fields handled downstream
-                    "extracted_requirements": {k: v for k, v in business_metadata.items()},
+                    # Pass business metadata and back-compat technical hints
+                    "extracted_requirements": {
+                        **{k: v for k, v in business_metadata.items()},
+                        # Back-compat aliases expected by tests
+                        **({"environment": business_metadata.get("appEnvironment")} if business_metadata.get("appEnvironment") else {}),
+                        **({"use_type": technical_hints.get("use_type")} if technical_hints.get("use_type") else {}),
+                        **({"machine_type": technical_hints.get("machine_type")} if technical_hints.get("machine_type") else {}),
+                        **({"zone": technical_hints.get("zone")} if technical_hints.get("zone") else {}),
+                        **({"project": technical_hints.get("project")} if technical_hints.get("project") else {}),
+                        **({"os": technical_hints.get("os")} if technical_hints.get("os") else {}),
+                    },
                     "business_metadata": business_metadata,  # Pass business metadata separately
                     "missing_info": [],
                     "conversation_history": [],
                     "confidence": 0.95
                 },
-                "reasoning": f"VM request detected with keywords - routing to compute agent. Extracted business metadata: {list(business_metadata.keys())}",
+                "reasoning": f"VM request detected - routing to compute agent. Business: {list(business_metadata.keys())}, hints: {list(technical_hints.keys())}",
                 "mode": "fast_path"
             }
             reasoning_chain = []

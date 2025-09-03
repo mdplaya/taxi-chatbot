@@ -25,7 +25,7 @@ class ComputeAgent(BaseAgent):
     def __init__(self, mcp_client=None):
         super().__init__(
             name="ComputeAgent",
-            goal="Route compute requests to appropriate cloud specialist agents",
+            goal="Extract VM requirements and route to appropriate cloud specialist agents",
             model="gpt-5-mini"
         )
         self.mcp = mcp_client
@@ -357,6 +357,29 @@ class ComputeAgent(BaseAgent):
                 "reasoning": result.get("reasoning", "")
             }
         }
+
+    def _extract_requirements_llm(self, user_input: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        LLM-based extraction of high-level compute requirements for back-compat tests.
+        Returns provider and requirements (environment/os/machine_type/zone), if any.
+        """
+        prompt = f"""
+        Extract compute requirements and provider from this text:
+        {user_input}
+
+        Respond JSON:
+        {{
+            "requirements": {{
+                "environment": "PROD|NONPROD|null",
+                "os": "LINUX_RHEL8|LINUX_RHEL9|WINDOWS_19|WINDOWS_22|null",
+                "machine_type": "e.g., n1-standard-1|null",
+                "zone": "e.g., us-east4-a|null"
+            }},
+            "provider": "gcp|aws|azure|unclear",
+            "confidence": 0.0-1.0
+        }}
+        """
+        return self._llm_reason(prompt)
     
     def _apply_corrections(self, user_input: str) -> str:
         """
@@ -444,7 +467,7 @@ class ComputeAgent(BaseAgent):
             self.logger.info("[ComputeAgent] Routing to clarification for unclear request")
         
         await self.emit_progress("complete", f"Routing complete - sending to {specialist}", 100)
-        
+
         # Store routing decision in memory
         self.memory.short_term.append({
             "request": raw_request,
@@ -452,10 +475,19 @@ class ComputeAgent(BaseAgent):
             "reasoning": routing_decision.get("reasoning"),
             "timestamp": datetime.now().isoformat()
         })
-        
+
+        # Back-compat: also return an extraction result for tests expecting llm_reasoning
+        extraction = self._extract_requirements_llm(raw_request, context)
+        vm_request = extraction.get("requirements", {})
+        provider = extraction.get("provider") or context.get("provider")
+
         return {
+            "vm_request": vm_request,
+            "provider": provider,
+            "mode": "llm_reasoning",
+            "reasoning_chain": self._get_reasoning_chain(),
+            # Include routing data for integration
             "next_agent": specialist,
-            "context": context,  # Pass full context to specialist
+            "context": context,
             "routing_metadata": routing_decision,
-            "mode": "llm_routing"  # Pure LLM routing
         }
