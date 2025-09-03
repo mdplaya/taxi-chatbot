@@ -210,12 +210,16 @@ class OrchestratorAgent(BaseAgent):
             extracted = {}
             
             # Extract business metadata fields first
-            # Extract email (requestor.id) without regex: simple token scan
+            # Extract email (requestor.id) using Pydantic EmailStr (no regex)
             tokens = [t.strip('.,;:()[]{}<>"\'') for t in processed_input.split()]
+            from pydantic import EmailStr
             for t in tokens:
-                if '@' in t and '.' in t.split('@')[-1] and len(t) >= 5:
-                    extracted["id"] = t
+                try:
+                    email = EmailStr(t)
+                    extracted["id"] = str(email)
                     break
+                except Exception:
+                    continue
             
             # Extract cost center (5-digit numeric) without regex
             for t in tokens:

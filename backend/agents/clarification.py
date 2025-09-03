@@ -545,12 +545,15 @@ class ClarificationAgent(BaseAgent):
                 # Normalize to enum-friendly lowercase with dashes
                 return val.lower().replace('_', '-').replace(' ', '-')
             if field == 'id':
-                # Simple email validation without regex
-                if isinstance(value, str):
-                    v = value.strip()
-                    if '@' in v and '.' in v.split('@')[-1] and ' ' not in v and len(v) >= 5:
-                        return v
-                return None
+                # Validate using Pydantic EmailStr instead of regex
+                try:
+                    from pydantic import EmailStr
+                    if value is None:
+                        return None
+                    email = EmailStr(str(value).strip())
+                    return str(email)
+                except Exception:
+                    return None
             if field in {'zone', 'project', 'costCenter'}:
                 return value
 
