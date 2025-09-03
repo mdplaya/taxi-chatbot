@@ -232,6 +232,7 @@ class ClarificationAgent(BaseAgent):
         - appEnvironment: PROD or NONPROD
         - lineOfBusiness: RETAIL, ISTS, or EDML
         - machineType: VM size (e2-small, n1-standard-1, etc.)
+        - id: requestor email address (e.g., user@company.com)
         
         Respond in JSON:
         {{
@@ -263,6 +264,21 @@ class ClarificationAgent(BaseAgent):
         except Exception as e:
             logger.error(f"Error generating questions: {e}")
             questions = []
+        
+        # Deterministic fallback for critical fields when LLM is unavailable
+        if not questions and new_fields:
+            fallback_map = {
+                "id": {
+                    "field": "id",
+                    "question": "What email should we use as the requestor ID?",
+                    "suggestions": ["user@example.com"],
+                    "why_needed": "We need an email to track who requested this.",
+                    "allows_custom": True
+                }
+            }
+            for f in new_fields:
+                if f in fallback_map:
+                    questions.append(fallback_map[f])
         
         # Convert questions to simple format for API compatibility
         simplified_questions = []
