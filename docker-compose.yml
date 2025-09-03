@@ -16,6 +16,7 @@ services:
       - taxi-network
 
   mcp-server:
+    image: taxi-chatbot-mcp-server
     build: 
       context: ./backend
       dockerfile: Dockerfile.mcp
@@ -36,6 +37,7 @@ services:
       - taxi-network
 
   api:
+    image: taxi-chatbot-api
     build: 
       context: ./backend
       dockerfile: Dockerfile.api
@@ -63,6 +65,7 @@ services:
       - taxi-network
 
   frontend:
+    image: taxi-chatbot-frontend
     build: 
       context: ./frontend
       dockerfile: Dockerfile
