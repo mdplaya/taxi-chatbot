@@ -106,6 +106,8 @@ class MCPServer:
                     "type": "cvsappid",
                     "value": "APM0015867"
                 },
+                "cloud": "GCP",
+                "resourceType": "compute",
                 "appEnvironment": vm_request.get("appEnvironment"),
                 "appEnvironmentSubtype": vm_request.get("appEnvironmentSubtype"),
                 "lineOfBusiness": vm_request.get("lineOfBusiness"),
@@ -129,6 +131,7 @@ class MCPServer:
                 }
             ],
             "options": {
+                "action": "create",
                 "dryRun": False,
                 "requestSource": "ISTS",
                 "requestor": {

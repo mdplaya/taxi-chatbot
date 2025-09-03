@@ -141,6 +141,8 @@ class VMRequest(BaseModel):
                     "type": "cvsappid",
                     "value": "APM0015867"
                 },
+                "cloud": "GCP",
+                "resourceType": "compute",
                 "appEnvironment": get_enum_value(self.appEnvironment),
                 "appEnvironmentSubtype": get_enum_value(self.appEnvironmentSubtype),
                 "lineOfBusiness": get_enum_value(self.lineOfBusiness),
@@ -164,6 +166,7 @@ class VMRequest(BaseModel):
                 }
             ],
             "options": {
+                "action": "create",
                 "dryRun": False,
                 "requestSource": "ISTS",
                 "requestor": {
