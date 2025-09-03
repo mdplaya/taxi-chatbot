@@ -35,7 +35,11 @@ env_path = Path(__file__).parent.parent / '.env'
 load_dotenv(dotenv_path=env_path)
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)s %(name)s: %(message)s',
+    datefmt='%m-%d-%Y--%H:%M:%S%z'
+)
 logger = logging.getLogger(__name__)
 
 # Check LLM availability on startup

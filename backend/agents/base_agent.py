@@ -500,15 +500,17 @@ class BaseAgent(ABC):
             return {}
         
         try:
-            response = self.llm.chat.completions.create(
-                model=self.model,
-                messages=[
+            payload = {
+                "model": self.model,
+                "messages": [
                     {"role": "system", "content": f"You are {self.name}, an intelligent agent. Always respond with valid JSON."},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=1.0,  # gpt-5-mini only supports temperature=1.0
-                response_format={"type": "json_object"}
-            )
+                "temperature": 1.0,
+                "response_format": {"type": "json_object"}
+            }
+            logger.info(f"[OpenAI Request] {json.dumps(payload, default=str)[:4000]}")
+            response = self.llm.chat.completions.create(**payload)
             
             return json.loads(response.choices[0].message.content)
         except Exception as e:

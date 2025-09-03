@@ -394,16 +394,18 @@ class ReasoningEngine:
             start = time.time()
             logger.debug(f"[LLM] Starting API call with prompt length: {len(prompt)}")
             
-            response = self.llm.chat.completions.create(
-                model=self.model,
-                messages=[
+            payload = {
+                "model": self.model,
+                "messages": [
                     {"role": "system", "content": "You are an intelligent reasoning engine. Always respond with valid JSON."},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=1.0,  # gpt-5-mini only supports temperature=1.0
-                response_format={"type": "json_object"},
-                timeout=60.0  # Increased timeout to 60 seconds for production use
-            )
+                "temperature": 1.0,
+                "response_format": {"type": "json_object"},
+                "timeout": 60.0
+            }
+            logger.info(f"[OpenAI Request] {json.dumps(payload, default=str)[:4000]}")
+            response = self.llm.chat.completions.create(**payload)
             
             elapsed = time.time() - start
             logger.info(f"[LLM] API call completed in {elapsed:.2f}s")
