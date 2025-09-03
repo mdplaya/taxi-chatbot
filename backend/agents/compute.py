@@ -74,6 +74,11 @@ class ComputeAgent(BaseAgent):
                 "parameters": ["user_input", "context"]
             },
             {
+                "name": "extract_resource_fields",
+                "description": "Extract resource-level fields (os, useType)",
+                "parameters": ["user_input", "context"]
+            },
+            {
                 "name": "route_to_specialist",
                 "description": "Route to appropriate compute specialist",
                 "parameters": ["specialist_name", "context"]
@@ -252,6 +257,11 @@ class ComputeAgent(BaseAgent):
                 "specialist": action.parameters.get("specialist_name"),
                 "context": action.parameters.get("context")
             }
+        elif action.name == "extract_resource_fields":
+            return self._extract_resource_fields(
+                action.parameters.get("user_input", ""),
+                action.parameters.get("context", {})
+            )
         elif action.name == "apply_corrections":
             return self._apply_corrections(
                 action.parameters.get("user_input", "")
@@ -316,6 +326,37 @@ class ComputeAgent(BaseAgent):
                 result["is_available"] = False
                 
         return result
+
+    def _extract_resource_fields(self, user_input: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Extract only resource-level fields from the user input:
+        - os: LINUX_RHEL8 | LINUX_RHEL9 | WINDOWS_19 | WINDOWS_22
+        - useType: app | database
+        Uses pure LLM reasoning; no pattern matching defaults here.
+        """
+        prompt = f"""
+        From this request, extract ONLY resource-level fields:
+        {user_input}
+
+        Respond in JSON with canonical keys:
+        {{
+            "os": "LINUX_RHEL8|LINUX_RHEL9|WINDOWS_19|WINDOWS_22|null",
+            "useType": "app|database|null",
+            "confidence": 0.0-1.0,
+            "reasoning": "brief"
+        }}
+        """
+        result = self._llm_reason(prompt)
+        os_val = result.get("os")
+        use_type_val = result.get("useType")
+        return {
+            "os": os_val if os_val else None,
+            "useType": use_type_val if use_type_val else None,
+            "_meta": {
+                "confidence": result.get("confidence", 0.5),
+                "reasoning": result.get("reasoning", "")
+            }
+        }
     
     def _apply_corrections(self, user_input: str) -> str:
         """
@@ -367,6 +408,17 @@ class ComputeAgent(BaseAgent):
         await self.emit_progress("detecting", "Detecting compute type and provider", 33)
         
         routing_decision = await self._detect_compute_type(raw_request, context)
+
+        # Enrich context with resource-level fields (os, useType)
+        resource_fields = self._extract_resource_fields(raw_request, context)
+        if resource_fields:
+            er = dict(context.get("extracted_requirements", {}))
+            # Only set canonical resource-level keys
+            if resource_fields.get("os"):
+                er["os"] = resource_fields["os"]
+            if resource_fields.get("useType"):
+                er["useType"] = resource_fields["useType"]
+            context["extracted_requirements"] = er
         
         # Check if specialist is available
         if routing_decision.get("specialist") and not routing_decision.get("is_available", True):

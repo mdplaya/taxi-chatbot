@@ -1,0 +1,16 @@
+# JSONPath expressions for json.values
+
+Business (Orchistration / Clarification)
+$.resourceMetadata.lineOfBusiness =
+$.options.requestor.id =
+$.resourceMetadata.appEnvironment =
+$.resourceMetadata.appEnvironmentSubtype = 
+$.resourceMetadata.costCenter =
+
+Resource (Compute)
+$.useType =
+$.os =
+
+Resource Specialist (GCE Specialist)
+$.zone =
+$.machineType = 

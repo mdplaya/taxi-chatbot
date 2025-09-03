@@ -14,8 +14,10 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from agents.base_agent import BaseAgent, Action
 from models.taxi_models import VMRequest
+from pydantic import ValidationError
 from utils.error_correction import ErrorCorrectionSystem
 from utils.learning import Pattern, PatternType
+from utils.gcp_catalog import get_all_machine_types, is_valid_machine_type, is_valid_zone, parse_region, is_valid_region
 
 logger = logging.getLogger(__name__)
 
@@ -154,7 +156,7 @@ class ClarificationAgent(BaseAgent):
             "known_info": known_info,
             "questions": questions,
             "corrections_available": corrections,
-            "current_state": vm_request.dict(),
+            "current_state": vm_request.model_dump(),
             "missing_count": len(missing_fields),
             "mode": "conversational"
         }
@@ -167,7 +169,7 @@ class ClarificationAgent(BaseAgent):
         Create a natural summary of what we know about this VM request:
         
         Current values:
-        {json.dumps({k: str(v) for k, v in vm_request.dict().items() if v is not None})}
+        {json.dumps({k: str(v) for k, v in vm_request.model_dump().items() if v is not None})}
         
         Missing fields:
         {json.dumps(missing_fields)}
@@ -190,7 +192,7 @@ class ClarificationAgent(BaseAgent):
         # Store in memory for learning
         self.memory.short_term.append({
             "type": "shown_info",
-            "vm_request": vm_request.dict(),
+            "vm_request": vm_request.model_dump(),
             "summary": result.get("summary", ""),
             "timestamp": datetime.now().isoformat()
         })
@@ -212,7 +214,7 @@ class ClarificationAgent(BaseAgent):
         Generate natural, conversational questions for missing information:
         
         Missing fields: {json.dumps(new_fields)}
-        Current context: {json.dumps({k: str(v) for k, v in vm_request.dict().items() if v is not None})}
+        Current context: {json.dumps({k: str(v) for k, v in vm_request.model_dump().items() if v is not None})}
         User's original request: {context.get('raw_request', '')}
         Conversation history: {json.dumps(context.get('conversation_history', [])[-5:])}
         
@@ -306,13 +308,13 @@ class ClarificationAgent(BaseAgent):
         """
         Proactively check if any values might need correction
         """
-        if not any(v is not None for v in vm_request.dict().values()):
+        if not any(v is not None for v in vm_request.model_dump().values()):
             return []
         
         correction_prompt = f"""
         Check if any values might need correction or validation:
         
-        Current values: {json.dumps({k: str(v) for k, v in vm_request.dict().items() if v is not None})}
+        Current values: {json.dumps({k: str(v) for k, v in vm_request.model_dump().items() if v is not None})}
         User context: {context.get('raw_request', '')}
         
         Look for:
@@ -359,7 +361,7 @@ class ClarificationAgent(BaseAgent):
             # Apply error correction
             correction_result = await self.error_correction.detect_and_correct(
                 value,
-                {"field": field, "vm_request": vm_request.dict()}
+                {"field": field, "vm_request": vm_request.model_dump()}
             )
             
             if correction_result.corrected != value:
@@ -392,7 +394,7 @@ class ClarificationAgent(BaseAgent):
                     
                     logger.info(f"[Clarification] Set {field} = {normalized}")
                     
-                except ValueError as e:
+                except (ValueError, ValidationError) as e:
                     logger.error(f"[Clarification] Invalid value for {field}: {normalized}")
                     # Learn from this error
                     await self.error_correction.learn_from_feedback(
@@ -409,29 +411,41 @@ class ClarificationAgent(BaseAgent):
         Normalize user input to expected format using LLM
         Handles variations, abbreviations, and natural language
         """
+        valid_values_prompt = ""
+        if field == 'machineType':
+            all_machine_types = get_all_machine_types()
+            if all_machine_types:
+                valid_values_prompt = f"- machineType: {json.dumps(all_machine_types)}"
+            else:
+                valid_values_prompt = "- machineType: e2-small, n1-standard-1, n2-standard-2, c2-standard-4, etc."
+        else:
+            valid_values_prompt = """
+            - appEnvironment: NONPROD, PROD
+            - appEnvironmentSubtype: dev, qa, test, perf
+            - lineOfBusiness: RETAIL, ISTS, EDML
+            - os: LINUX_RHEL8, LINUX_RHEL9, WINDOWS_19, WINDOWS_22
+            - useType: app, database
+            - zone: us-east4-a, us-central1-b, etc.
+            """
+
         normalize_prompt = f"""
         Normalize this user input for field '{field}':
-        
+
         User input: {value}
         Field type: {field}
-        Current VM request context: {json.dumps({k: str(v) for k, v in vm_request.dict().items() if v is not None})}
-        
+        Current VM request context: {json.dumps({k: str(v) for k, v in vm_request.model_dump().items() if v is not None})}
+
         Valid values by field:
-        - appEnvironment: NONPROD, PROD
-        - appEnvironmentSubtype: dev, qa, test, perf
-        - lineOfBusiness: RETAIL, ISTS, EDML
-        - os: LINUX_RHEL8, LINUX_RHEL9, WINDOWS_19, WINDOWS_22
-        - useType: app, database
-        - machineType: e2-small, n1-standard-1, n2-standard-2, c2-standard-4, etc.
-        - zone: us-east4-a, us-central1-b, etc.
-        
+        {valid_values_prompt}
+
         Understand variations like:
         - "production" -> "PROD"
         - "rhel 8" -> "LINUX_RHEL8"
         - "windows server 2019" -> "WINDOWS_19"
         - "retail division" -> "RETAIL"
         - "application server" -> "app"
-        
+        - "standard n1 4gb" -> "n1-standard-4"
+
         Respond in JSON:
         {{
             "normalized_value": "the normalized value or null if invalid",
@@ -439,15 +453,15 @@ class ClarificationAgent(BaseAgent):
             "reasoning": "explanation"
         }}
         """
-        
+
         result = self._llm_reason(normalize_prompt)
-        
+
         normalized = result.get("normalized_value")
         confidence = result.get("confidence", 0)
-        
+
         if confidence < 0.5:
             logger.warning(f"[Clarification] Low confidence normalization for {field}: {value} -> {normalized}")
-        
+
         return normalized
     
     async def _confirm_before_action(self, vm_request: VMRequest, context: Dict[str, Any]) -> Dict[str, Any]:
@@ -458,7 +472,7 @@ class ClarificationAgent(BaseAgent):
         Create a natural confirmation message for this VM request:
         
         Final configuration:
-        {json.dumps({k: str(v) for k, v in vm_request.dict().items() if v is not None}, indent=2)}
+        {json.dumps({k: str(v) for k, v in vm_request.model_dump().items() if v is not None}, indent=2)}
         
         Generate a friendly confirmation that:
         1. Summarizes the configuration
@@ -478,7 +492,7 @@ class ClarificationAgent(BaseAgent):
         
         return {
             "complete": True,
-            "vm_request": vm_request.dict(),
+            "vm_request": vm_request.model_dump(),
             "confirmation": result.get("confirmation_message"),
             "key_points": result.get("key_points", []),
             "allows_edit": result.get("allows_edit", True),

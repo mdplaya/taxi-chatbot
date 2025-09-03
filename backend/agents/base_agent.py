@@ -269,7 +269,7 @@ class BaseAgent(ABC):
         reflection_prompt = f"""
         As {self.name} agent, reflect on this:
         
-        Action taken: {json.dumps(action.dict()) if action else "No action"}
+        Action taken: {json.dumps(action.model_dump()) if action else "No action"}
         Outcome: {json.dumps(outcome) if isinstance(outcome, dict) else str(outcome)}
         Domain context: {json.dumps(domain_specific_data) if domain_specific_data else "None"}
         
@@ -611,7 +611,7 @@ class BaseAgent(ABC):
                 # Add to short-term memory
                 self.memory.short_term.append({
                     "input": input_data,
-                    "action": action.dict(),
+                    "action": action.model_dump(),
                     "outcome": outcome,
                     "timestamp": datetime.now().isoformat()
                 })

@@ -1,4 +1,5 @@
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator, ConfigDict, EmailStr, model_validator
+import re
 from typing import Optional, List, Literal, Dict, Any
 from enum import Enum
 from datetime import datetime
@@ -56,21 +57,60 @@ class MachineType(str, Enum):
 
 class VMRequest(BaseModel):
     """User's VM request with optional fields"""
+    # Ensure validators run on attribute assignment (pydantic v2)
+    model_config = ConfigDict(validate_assignment=True)
     appEnvironment: Optional[AppEnvironment] = None
     appEnvironmentSubtype: Optional[AppEnvironmentSubtype] = None
     lineOfBusiness: Optional[LineOfBusiness] = None
+    # Pattern is for schema docs; validator enforces logic
     costCenter: Optional[str] = Field(None, pattern=r"^\d{5}$")
-    project: Optional[str] = None
-    zone: Optional[str] = None
+    # GCP project ID: 6-30 chars, lowercase letters, digits, hyphens
+    project: Optional[str] = Field(
+        None,
+        pattern=r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$"
+    )
+    # GCP zone format: e.g., us-east4-a
+    zone: Optional[str] = Field(
+        None,
+        pattern=r"^[a-z]+-[a-z0-9]+[0-9]-[a-z]$"
+    )
     os: Optional[OS] = None
     useType: Optional[UseType] = None
     machineType: Optional[MachineType] = None
-    id: Optional[str] = None  # Email address
+    id: Optional[EmailStr] = None  # Email address
     
-    @validator('costCenter')
+    @field_validator('costCenter')
     def validate_cost_center(cls, v):
         if v and not (v.isdigit() and len(v) == 5):
             raise ValueError('Cost center must be exactly 5 digits')
+        return v
+
+    @model_validator(mode='after')
+    def infer_environment_from_subtype(self):
+        """
+        If a NONPROD subtype (dev/qa/test/perf) is provided but appEnvironment is
+        not set or is PROD, infer NONPROD to avoid unnecessary validation prompts.
+
+        This keeps validation progressive: we do NOT raise if NONPROD lacks
+        a subtype; get_missing_fields() already lists subtype when needed.
+        """
+        try:
+            if self.appEnvironmentSubtype is not None:
+                if self.appEnvironment is None or self.appEnvironment == AppEnvironment.PROD:
+                    self.appEnvironment = AppEnvironment.NONPROD
+        except Exception:
+            # Be defensive: never break model construction here
+            pass
+        return self
+    
+    @field_validator('project')
+    def validate_project(cls, v):
+        if not v:
+            return v
+        # Disallow consecutive hyphens
+        if '--' in v:
+            raise ValueError('Project ID cannot contain consecutive hyphens')
+        # Already covered by pattern: start letter, end alnum, length bounds
         return v
     
     def get_missing_fields(self) -> List[str]:
@@ -146,7 +186,7 @@ class ProgressStep(BaseModel):
     status: Literal["started", "in_progress", "completed", "failed"]
     percentage: Optional[int] = None  # 0-100 progress percentage
     message: str  # User-friendly message
-    metadata: Dict[str, Any] = {}
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 class ChatSession(BaseModel):
     """Track conversation state with progress tracking"""
@@ -154,18 +194,18 @@ class ChatSession(BaseModel):
     created_at: datetime
     vm_request: VMRequest
     status: Literal["gathering_info", "ready_to_provision", "provisioning", "complete", "failed"]
-    messages: List[Dict[str, Any]] = []
+    messages: List[Dict[str, Any]] = Field(default_factory=list)
     taxi_payload: Optional[Dict[str, Any]] = None
     taxi_response: Optional[Dict[str, Any]] = None
     
     # Progress tracking fields
-    progress_steps: List[ProgressStep] = []
+    progress_steps: List[ProgressStep] = Field(default_factory=list)
     current_agent: Optional[str] = None
     current_step: Optional[str] = None
     last_progress_update: Optional[datetime] = None
     
     # Metadata for tracking additional context (like asked_fields)
-    metadata: Dict[str, Any] = {}
+    metadata: Dict[str, Any] = Field(default_factory=dict)
     
     def add_progress(self, agent: str, step: str, message: str, 
                     status: str = "in_progress", percentage: Optional[int] = None) -> ProgressStep:

@@ -51,8 +51,6 @@ services:
       - VALKEY_AGENT_DB=1
       - AGENT_REASONING_MODEL=gpt-5-mini
       - REASONING_TEMPERATURE=1.0
-    volumes:
-      - ./backend:/app
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s

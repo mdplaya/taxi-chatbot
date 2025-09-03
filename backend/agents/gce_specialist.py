@@ -5,12 +5,22 @@ NO hardcoded validation rules - all through intelligent reasoning
 
 from typing import Dict, Any, List, Optional
 from models.taxi_models import VMRequest, MachineType
+from pydantic import ValidationError
 import logging
 import json
 from datetime import datetime
 from agents.base_agent import BaseAgent, Action
 from utils.learning import Pattern, PatternType
 import os
+from utils.gcp_catalog import (
+    is_valid_machine_type,
+    is_valid_zone,
+    parse_region,
+    is_valid_region,
+    machine_family,
+    is_family_supported_in_region,
+    REGION_SUPPORTED_FAMILIES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -159,7 +169,7 @@ class GCESpecialistAgent(BaseAgent):
         business_metadata = context.get('business_metadata', {})
         
         extraction_prompt = f"""
-        Extract TECHNICAL GCE VM requirements from this request:
+        Extract TECHNICAL GCE VM requirements from this request (specialist scope only):
         {raw_request}
         
         Context from previous analysis (use as hints if relevant):
@@ -171,44 +181,11 @@ class GCESpecialistAgent(BaseAgent):
         Full context: {json.dumps(context, default=str)[:500]}
         
         IMPORTANT: 
-        1. Focus ONLY on technical VM configuration fields
-        2. DO NOT extract business metadata (id, costCenter, lineOfBusiness) - these are handled by Orchestrator
-        3. If the context already contains extracted values, use them unless the raw request explicitly contradicts them
-        
-        Apply intelligent corrections and inference:
-        
-        ENVIRONMENT INFERENCE (with automatic subtype):
-        - Development keywords: "development", "dev", "develop", "sandbox", "demo", "poc", 
-          "proof of concept", "prototype", "experimental", "training", "learning", "education"
-          → appEnvironment: NONPROD, appEnvironmentSubtype: dev
-        
-        - Testing keywords: "testing", "test", "unit test", "integration", "staging", 
-          "stage", "pre-prod", "preprod", "uat", "user acceptance"
-          → appEnvironment: NONPROD, appEnvironmentSubtype: test
-        
-        - QA keywords: "qa", "quality", "quality assurance", "validation", "verification"
-          → appEnvironment: NONPROD, appEnvironmentSubtype: qa
-        
-        - Performance keywords: "performance", "perf", "load test", "stress test", 
-          "benchmark", "capacity"
-          → appEnvironment: NONPROD, appEnvironmentSubtype: perf
-        
-        - Production keywords: "production", "prod", "live", "operational", "operations", 
-          "critical", "customer-facing", "public"
-          → appEnvironment: PROD
-        
-        OS DEFAULTS (only when OS type is mentioned):
-        - "Linux" or "linux server" without specific distro → LINUX_RHEL9
-        - "Windows" or "windows server" without version → WINDOWS_22
-        - "RHEL" or "Red Hat" without version → LINUX_RHEL9
-        - DO NOT default "server" alone to any OS
+        1. Focus ONLY on specialist technical fields (GCE): project, zone, machineType
+        2. DO NOT extract business metadata (id, costCenter, lineOfBusiness, appEnvironment, appEnvironmentSubtype) - handled by Orchestrator
+        3. DO NOT extract os or useType - handled by Compute agent. Use values from context if present.
+        4. If the context already contains extracted values, use them unless the raw request explicitly contradicts them
 
-        USE TYPE INFERENCE:
-        - Web/Frontend keywords: "web", "website", "frontend", "ui" → useType: web
-        - Database keywords: "database", "db", "mysql", "postgres", "storage" → useType: database
-        - Backend/API keywords: "api", "backend", "service", "microservice" → useType: app
-        - Default if unclear → useType: app
-        
         STRICT NON-DEFAULTING FOR ZONE AND MACHINE TYPE:
         - DO NOT assume or default a GCP zone. If only a region is given (e.g., "us-east4"), mark "zone" as missing and include a clarification question like "Which zone (a, b, c) in us-east4?".
         - DO NOT assume or default a machine type. If not explicitly specified, mark "machineType" as missing and include a clarification question like "Which GCP machine type (e.g., e2-small, n1-standard-1)?".
@@ -224,19 +201,14 @@ class GCESpecialistAgent(BaseAgent):
         - "e2" alone → Ask which e2 type
         - Fix common typos and variations
         
-        Extract ONLY these TECHNICAL fields (skip business metadata):
+        Extract ONLY these TECHNICAL fields (skip business/resource metadata):
         - project: GCP project ID
         - zone: Full zone (e.g., us-east4-a)
-        - os: LINUX_RHEL8/LINUX_RHEL9/WINDOWS_19/WINDOWS_22
-        - useType: app/database
         - machineType: Valid GCP machine type
         
-        DO NOT extract these business fields (handled by Orchestrator):
-        - appEnvironment
-        - appEnvironmentSubtype
-        - lineOfBusiness
-        - costCenter
-        - id (user email)
+        DO NOT extract these business/resource fields (handled by Orchestrator/Compute):
+        - appEnvironment, appEnvironmentSubtype, lineOfBusiness, costCenter, id (user email)
+        - os, useType
         
         DO NOT extract or ask about:
         - Firewall rules
@@ -250,22 +222,20 @@ class GCESpecialistAgent(BaseAgent):
             "extracted_fields": {{
                 "project": "value or null",
                 "zone": "value or null",
-                "os": "value or null",
-                "useType": "value or null",
                 "machineType": "value or null"
             }},
             "corrections_applied": ["list of corrections"],
-            "missing_fields": ["list of TECHNICAL fields not found"],
-            "clarifications_needed": ["specific questions for missing TECHNICAL info only"],
+            "missing_fields": ["list of TECHNICAL fields not found (only project, zone, machineType)"],
+            "clarifications_needed": ["specific questions for missing TECHNICAL info only (project, zone, machineType)"],
             "confidence": 0.0-1.0
         }}
         
         CRITICAL: Return EXACT enum values (case-sensitive):
-        - appEnvironment: MUST be exactly "NONPROD" or "PROD" (not "nonprod", "dev", etc.)
-        - os: MUST be exactly "LINUX_RHEL8", "LINUX_RHEL9", "WINDOWS_19", or "WINDOWS_22"
-        - useType: MUST be exactly "web" or "app" or "database" (lowercase)
-        - lineOfBusiness: MUST be exactly "RETAIL", "ISTS", or "EDML" (uppercase)
-        - appEnvironmentSubtype: MUST be exactly "dev", "qa", "test", or "perf" (lowercase)
+        - appEnvironment: MUST be exactly "NONPROD" or "PROD" (not "nonprod", "dev", etc.) [from context]
+        - os: MUST be exactly "LINUX_RHEL8", "LINUX_RHEL9", "WINDOWS_19", or "WINDOWS_22" [from context]
+        - useType: MUST be exactly "app" or "database" (lowercase) [from context]
+        - lineOfBusiness: MUST be exactly "RETAIL", "ISTS", or "EDML" (uppercase) [from context]
+        - appEnvironmentSubtype: MUST be exactly "dev", "qa", "test", or "perf" (lowercase) [from context]
         - machineType: Use exact GCP machine type strings (e.g., "e2-small", "n1-standard-1")
         """
         
@@ -281,7 +251,7 @@ class GCESpecialistAgent(BaseAgent):
                 if value is not None:
                     result["extracted_fields"][key] = value
         
-        # Merge context's extracted_requirements into the extracted_fields
+        # Merge context's extracted_requirements into the extracted_fields (os/useType, appEnvironment, etc.)
         if extracted_requirements:
             if not result.get("extracted_fields"):
                 result["extracted_fields"] = {}
@@ -289,11 +259,10 @@ class GCESpecialistAgent(BaseAgent):
             # Use context values for any fields that are provided
             for key, value in extracted_requirements.items():
                 if value is not None:
-                    # Map the field names appropriately
+                    # Map canonical field names appropriately
                     if key == "environment":
+                        # Backward-compat: map legacy key
                         result["extracted_fields"]["appEnvironment"] = value
-                    elif key == "use_type":
-                        result["extracted_fields"]["useType"] = value
                     else:
                         result["extracted_fields"][key] = value
         
@@ -524,7 +493,7 @@ class GCESpecialistAgent(BaseAgent):
         if isinstance(vm_request, dict):
             vm_dict = vm_request
         else:
-            vm_dict = vm_request.dict(exclude_none=True)
+            vm_dict = vm_request.model_dump(exclude_none=True)
         
         # Only map what we have; do not invent defaults
         filtered_dict = {k: v for k, v in vm_dict.items() if v is not None}
@@ -560,6 +529,73 @@ class GCESpecialistAgent(BaseAgent):
                 "missing_fields": missing_fields,
                 "questions": questions,
                 "partial_data": filtered_dict
+            }
+
+        # All required fields are present; validate against in-code catalog
+        mt = filtered_dict.get("machineType")
+        zone = filtered_dict.get("zone")
+
+        # 1) Validate machine type
+        if not is_valid_machine_type(mt):
+            return {
+                "success": False,
+                "needs_clarification": True,
+                "questions": [
+                    {
+                        "field": "machineType",
+                        "question": "Which GCP machine type (e.g., e2-small, n1-standard-1)?",
+                        "reason": "Unrecognized machine type"
+                    }
+                ],
+                "partial_data": filtered_dict,
+            }
+
+        # 2) Validate zone and region
+        if not is_valid_zone(zone):
+            return {
+                "success": False,
+                "needs_clarification": True,
+                "questions": [
+                    {
+                        "field": "zone",
+                        "question": "Which GCP zone should we use (e.g., us-east4-a)?",
+                        "reason": "Invalid or unsupported zone"
+                    }
+                ],
+                "partial_data": filtered_dict,
+            }
+
+        region = parse_region(zone)
+        if not is_valid_region(region):
+            return {
+                "success": False,
+                "needs_clarification": True,
+                "questions": [
+                    {
+                        "field": "zone",
+                        "question": "Which GCP zone should we use (e.g., us-east4-a)?",
+                        "reason": "Invalid or unsupported region"
+                    }
+                ],
+                "partial_data": filtered_dict,
+            }
+
+        # 3) Validate region-family support for the chosen machine type
+        family = machine_family(mt)
+        if not is_family_supported_in_region(family, region):
+            supported = sorted(REGION_SUPPORTED_FAMILIES.get(region, set()))
+            return {
+                "success": False,
+                "needs_clarification": True,
+                "questions": [
+                    {
+                        "field": "machineType",
+                        "question": "Select a machine type available in the chosen region.",
+                        "reason": f"Family {family} not supported in region {region}",
+                        "supportedFamilies": supported,
+                    }
+                ],
+                "partial_data": filtered_dict,
             }
 
         # All required fields present; build payload directly
@@ -722,7 +758,10 @@ class GCESpecialistAgent(BaseAgent):
                 if vm_request_data.get("machineType"):
                     vm_request.machineType = vm_request_data["machineType"]
                 if vm_request_data.get("id"):
-                    vm_request.id = vm_request_data["id"]
+                    try:
+                        vm_request.id = vm_request_data["id"]
+                    except (ValueError, ValidationError):
+                        self.logger.warning(f"[GCE] Ignoring invalid requestor id: {vm_request_data['id']}")
             else:
                 vm_request = vm_request_data
             
@@ -784,14 +823,17 @@ class GCESpecialistAgent(BaseAgent):
             if extracted_fields.get("machineType"):
                 vm_request.machineType = extracted_fields["machineType"]
             if extracted_fields.get("id"):
-                vm_request.id = extracted_fields["id"]
+                try:
+                    vm_request.id = extracted_fields["id"]
+                except (ValueError, ValidationError):
+                    self.logger.warning(f"[GCE] Ignoring invalid extracted requestor id: {extracted_fields['id']}")
         
         # Step 2: Validate configuration (if not skipped)
         validation = {"valid": True, "issues": []}
         if not config.get("skip_validation"):
             self.current_step += 1
             await self.emit_progress("validating", "Validating configuration", 40)
-            validation = self._validate_config_llm(vm_request.dict(exclude_none=True))
+            validation = self._validate_config_llm(vm_request.model_dump(exclude_none=True))
             
             if not validation.get("valid", False):
                 severe_issues = [i for i in validation.get("issues", []) if i.get("severity") == "error"]
@@ -808,7 +850,7 @@ class GCESpecialistAgent(BaseAgent):
         if not config.get("skip_improvements"):
             self.current_step += 1
             await self.emit_progress("optimizing", "Optimizing configuration", 50)
-            improvements = self._suggest_improvements(vm_request.dict(exclude_none=True))
+            improvements = self._suggest_improvements(vm_request.model_dump(exclude_none=True))
         
         # Step 4: Build TAXI payload
         self.current_step += 1
@@ -837,7 +879,12 @@ class GCESpecialistAgent(BaseAgent):
         """
         Validate GCE configuration with pure LLM reasoning
         """
-        vm_dict = vm_request.dict(exclude_none=True) if hasattr(vm_request, 'dict') else vm_request
+        vm_dict = (
+            vm_request.model_dump(exclude_none=True)
+            if hasattr(vm_request, 'model_dump') else (
+                vm_request.dict(exclude_none=True) if hasattr(vm_request, 'dict') else vm_request
+            )
+        )
         validation = self._validate_config_llm(vm_dict)
         
         # Check quota availability

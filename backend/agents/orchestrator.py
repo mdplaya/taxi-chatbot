@@ -206,15 +206,7 @@ class OrchestratorAgent(BaseAgent):
                 'onprem': ['on-prem', 'on prem', 'onprem', 'datacenter', 'vmware']
             }
             
-            # Enhanced OS detection - use correct enum values
-            os_patterns = {
-                'WINDOWS_22': ['windows 2022', 'win2022', 'win22', 'windows 22'],
-                'WINDOWS_19': ['windows 2019', 'win2019', 'win19', 'windows 19'],
-                'LINUX_RHEL9': ['rhel9', 'rhel 9', 'red hat 9', 'redhat 9'],
-                'LINUX_RHEL8': ['rhel8', 'rhel 8', 'red hat 8', 'redhat 8']
-            }
-            
-            # Extract all possible requirements
+            # Extract all possible requirements (business metadata + provider only)
             extracted = {}
             
             # Extract business metadata fields first
@@ -250,33 +242,7 @@ class OrchestratorAgent(BaseAgent):
                     break
             # Don't set a default provider - let clarification agent handle it
             
-            # Enhanced OS detection with defaults
-            os_detected = False
-            for os_type, patterns in os_patterns.items():
-                if any(pattern in user_lower for pattern in patterns):
-                    extracted["os"] = os_type
-                    os_detected = True
-                    break
-            
-            # Apply OS defaults if not detected (check for generic terms)
-            if not os_detected:
-                if 'windows' in user_lower:
-                    # Check for specific versions first
-                    if '2019' in user_lower or 'win19' in user_lower:
-                        extracted["os"] = "WINDOWS_19"
-                    elif '2022' in user_lower or 'win22' in user_lower:
-                        extracted["os"] = "WINDOWS_22"
-                    else:
-                        extracted["os"] = "WINDOWS_22"  # Default Windows
-                elif 'linux' in user_lower or 'rhel' in user_lower or 'red hat' in user_lower:
-                    # Check for specific versions
-                    if '8' in user_lower:
-                        extracted["os"] = "LINUX_RHEL8"
-                    elif '9' in user_lower:
-                        extracted["os"] = "LINUX_RHEL9"
-                    else:
-                        extracted["os"] = "LINUX_RHEL9"  # Default Linux
-            # Comprehensive environment detection with subtype
+            # Comprehensive environment detection with subtype (business metadata only)
             env_keywords = {
                 'PROD': ['production', 'prod', 'live', 'operational', 'operations', 
                          'critical', 'customer-facing', 'public'],
@@ -295,98 +261,53 @@ class OrchestratorAgent(BaseAgent):
             # Check for PROD first
             for keyword in env_keywords['PROD']:
                 if keyword in user_lower:
-                    extracted["environment"] = "PROD"
+                    extracted["appEnvironment"] = "PROD"
                     break
             else:
                 # Check for NONPROD with subtype
                 for subtype, keywords in env_keywords['NONPROD'].items():
                     for keyword in keywords:
                         if keyword in user_lower:
-                            extracted["environment"] = "NONPROD"
+                            extracted["appEnvironment"] = "NONPROD"
                             extracted["appEnvironmentSubtype"] = subtype
                             break
-                    if extracted.get("environment"):
+                    if extracted.get("appEnvironment"):
                         break
-            
-            # Detect zone/region
-            import re
-            zone_pattern = r'\b(us-\w+(-\w+)?|europe-\w+(-\w+)?|asia-\w+(-\w+)?)\b'
-            zone_match = re.search(zone_pattern, user_lower)
-            if zone_match:
-                extracted["zone"] = zone_match.group(0)
-            
-            # Detect machine type
-            machine_patterns = ['e2-', 'n1-', 'n2-', 't2.', 'm5.', 'standard']
-            for pattern in machine_patterns:
-                if pattern in user_lower:
-                    # Try to extract the full machine type
-                    machine_match = re.search(f'{pattern}\\w+', user_lower)
-                    if machine_match:
-                        extracted["machine_type"] = machine_match.group(0)
-                    break
-            
-            # Enhanced use type detection
-            if any(x in user_lower for x in ['database', 'db', 'mysql', 'postgres', 'mongodb', 'redis', 'storage']):
-                extracted["use_type"] = "database"
-            elif any(x in user_lower for x in ['web', 'website', 'frontend', 'ui']):
-                extracted["use_type"] = "app"  # Map to 'app' for TAXI compatibility
-            elif any(x in user_lower for x in ['api', 'backend', 'service', 'microservice', 'application']):
-                extracted["use_type"] = "app"
-            else:
-                # Don't default use_type - let clarification handle it
-                pass
-            
-            # Project detection (if mentioned)
-            if 'project' in user_lower:
-                # Try to extract project name (word after 'project')
-                project_match = re.search(r'project\s+(\S+)', user_lower)
-                if project_match:
-                    extracted["project"] = project_match.group(1)
             
             # Separate business metadata from technical fields
             business_metadata = {}
-            technical_fields = {}
             
             for key, value in extracted.items():
-                if key in ['id', 'costCenter', 'lineOfBusiness', 'environment', 'appEnvironmentSubtype']:
+                if key in ['id', 'costCenter', 'lineOfBusiness', 'appEnvironment', 'appEnvironmentSubtype']:
                     business_metadata[key] = value
-                else:
-                    technical_fields[key] = value
             
             routing_decision = {
                 "next_agent": "compute",
                 "context": {
                     "intent": "create_compute",
                     "resource_type": "vm",
-                    "provider": technical_fields.get("provider"),  # No default - will be None if not specified
+                    "provider": extracted.get("provider"),  # No default - will be None if not specified
                     "raw_request": processed_input,
                     "session_id": session_id,
-                    "extracted_requirements": extracted,
+                    # Pass only business metadata as extracted requirements; technical fields handled downstream
+                    "extracted_requirements": {k: v for k, v in business_metadata.items()},
                     "business_metadata": business_metadata,  # Pass business metadata separately
-                    "technical_fields": technical_fields,  # Pass technical fields separately
                     "missing_info": [],
                     "conversation_history": [],
                     "confidence": 0.95
                 },
-                "reasoning": f"VM request detected with keywords - routing to compute agent. Extracted business metadata: {list(business_metadata.keys())}, technical: {list(technical_fields.keys())}",
+                "reasoning": f"VM request detected with keywords - routing to compute agent. Extracted business metadata: {list(business_metadata.keys())}",
                 "mode": "fast_path"
             }
             reasoning_chain = []
             logger.info(f"[Orchestrator] Fast path extracted: {extracted}")
             
             # Log environment inference if applied
-            if extracted.get("environment"):
-                env_msg = f"Inferred environment: {extracted['environment']}"
+            if extracted.get("appEnvironment"):
+                env_msg = f"Inferred environment: {extracted['appEnvironment']}"
                 if extracted.get("appEnvironmentSubtype"):
                     env_msg += f" (subtype: {extracted['appEnvironmentSubtype']})"
                 logger.info(f"[Orchestrator] {env_msg}")
-            
-            # Log OS defaults if applied
-            if extracted.get("os"):
-                if 'linux' in user_lower and extracted["os"] == "LINUX_RHEL9":
-                    logger.info("[Orchestrator] Applied default OS: LINUX_RHEL9 for generic Linux")
-                elif 'windows' in user_lower and extracted["os"] == "WINDOWS_22":
-                    logger.info("[Orchestrator] Applied default OS: WINDOWS_22 for generic Windows")
         else:
             # Use reasoning engine for complex requests
             routing_decision, reasoning_chain = await self.reasoning_engine.reason(

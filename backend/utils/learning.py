@@ -441,7 +441,7 @@ class LearningEngine:
         """
         Persist user preferences to Valkey.
         """
-        pref_data = preferences.dict()
+        pref_data = preferences.model_dump()
         
         return await self.valkey_manager.save_agent_memory(
             agent_name=f"user_{preferences.user_id}",

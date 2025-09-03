@@ -1,0 +1,6 @@
+ultra ultra ultra think.  Review all code and suggest improvements for this code base.  Review all mark down files in the root         
+directory for context and come back with clear ideas to improve performance and user experiance of the application.  Thoughly    
+understand the agent architecture and recommend ways to improve the logic and performance.  
+
+Also the user interface is not conversational. There are too many questions in one prompt when asking for information.  You should ask   We need to review the user interface to improve communication between the user and agents.   Finally we need to improve the web ui by putting in shadcn and      
+tailwind css compentents.  Prior to doing anything you MUST get my approval

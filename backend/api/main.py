@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from sse_starlette.sse import EventSourceResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from typing import Optional, Dict, Any, List, Literal
 import logging
 import uuid
@@ -24,6 +24,7 @@ from agents.gce_specialist import GCESpecialistAgent
 from models.taxi_models import VMRequest, ChatSession, ProgressStep
 from models.agent_session import AgentSession, ConversationState
 from utils.llm_manager import llm_manager
+from utils.fields import CANONICAL_VM_FIELDS, canonical_vm_fields, sanitize_answers
 from utils.progress_manager import progress_manager
 from utils.valkey_manager import valkey_manager
 from utils.learning import LearningEngine
@@ -47,6 +48,81 @@ else:
 
 # Initialize FastAPI app
 app = FastAPI(title="TAXI Chatbot API")
+
+def infer_field_from_question(question: str) -> str:
+    """Infer a VMRequest field name from a natural-language question string.
+
+    Avoids mapping to meaningless values like "which" by scanning for
+    known keywords and returning canonical field names used by ClarificationAgent
+    and VMRequest.
+    """
+    if not question:
+        return ""
+    q = question.strip().lower()
+
+    # Machine type synonyms
+    if (
+        "machine type" in q
+        or "instance type" in q
+        or "vm size" in q
+        or ("size" in q and ("vm" in q or "instance" in q))
+    ):
+        return "machineType"
+
+    # Zone / Region (we track zone; region is derived)
+    if " zone" in q or q.startswith("zone") or "gcp zone" in q:
+        return "zone"
+    if " region" in q or q.startswith("region") or "gcp region" in q:
+        # We prefer zone in our schema; ask for zone even if question says region
+        return "zone"
+
+    # OS
+    if "operating system" in q or q.startswith("os") or " which os" in q:
+        return "os"
+
+    # Use type
+    if (
+        "use type" in q
+        or "workload type" in q
+        or "app or database" in q
+        or "application or database" in q
+        or ("app" in q and "database" in q)
+    ):
+        return "useType"
+
+    # Project
+    if "project" in q:
+        return "project"
+
+    # Cost center
+    if "cost center" in q.replace("-", " ") or "billing code" in q:
+        return "costCenter"
+
+    # Line of business
+    if "line of business" in q or "lob" in q:
+        return "lineOfBusiness"
+
+    # Requestor email/id
+    if "email" in q or "requestor" in q or "requester" in q or q.strip() == "id":
+        return "id"
+
+    # Environment
+    if "environment" in q:
+        return "appEnvironment"
+    if any(x in q for x in ["dev", "qa", "test", "perf"]):
+        return "appEnvironmentSubtype"
+
+    # Fallback: try to detect any canonical field mention directly
+    canonical = [
+        "machineType", "zone", "project", "lineOfBusiness", "costCenter",
+        "os", "useType", "id", "appEnvironment", "appEnvironmentSubtype"
+    ]
+    for name in canonical:
+        if name.lower() in q:
+            return name
+
+    # Unknown; return empty to avoid bad field like "which"
+    return ""
 
 def normalize_vm_field_value(field: str, value: Any) -> Any:
     """
@@ -293,24 +369,38 @@ async def chat(request: ChatRequest):
                         for key, value in partial_data.items():
                             if value is not None and hasattr(session.vm_request, key):
                                 normalized_value = normalize_vm_field_value(key, value)
-                                setattr(session.vm_request, key, normalized_value)
+                                try:
+                                    setattr(session.vm_request, key, normalized_value)
+                                except (ValueError, ValidationError):
+                                    logger.warning(f"[API] Ignoring invalid value for {key}: {normalized_value}")
                     
                     session.status = "gathering_info"
                     legacy_sessions[session_id] = session
                     
-                    # Format questions for client
+                    # Format questions for client with canonical field inference
                     formatted_questions = []
                     for q in questions[:3]:  # Ask up to 3 questions at a time
                         if isinstance(q, str):
-                            # Simple string question
-                            field = q.split(" ")[0].lower()  # Try to extract field name
+                            inferred_field = infer_field_from_question(q)
+                            field = inferred_field or ("machineType" if "machine" in q.lower() else "")
                             formatted_questions.append({
                                 "field": field,
                                 "question": q,
                                 "description": ""
                             })
                         elif isinstance(q, dict):
-                            formatted_questions.append(q)
+                            question_text = q.get("question", "Please provide this information.")
+                            fld = str(q.get("field", "") or "").strip()
+                            if fld not in CANONICAL_VM_FIELDS:
+                                inferred = infer_field_from_question(question_text)
+                                if not inferred and "machine" in question_text.lower():
+                                    inferred = "machineType"
+                                fld = inferred or (fld if fld else "")
+                            formatted_questions.append({
+                                "field": fld,
+                                "question": question_text,
+                                "description": q.get("description", "")
+                            })
                     
                     corrections_msg = ""
                     if provision_result.get("corrections_applied"):
@@ -437,7 +527,10 @@ async def chat(request: ChatRequest):
                     for key, value in compute_result.items():
                         if hasattr(session.vm_request, key) and value is not None:
                             normalized_value = normalize_vm_field_value(key, value)
-                            setattr(session.vm_request, key, normalized_value)
+                            try:
+                                setattr(session.vm_request, key, normalized_value)
+                            except (ValueError, ValidationError):
+                                logger.warning(f"[API] Ignoring invalid value for {key}: {normalized_value}")
                     
                     # Check for missing fields and generate clarifications
                     missing = session.vm_request.get_missing_fields()
@@ -473,7 +566,10 @@ async def chat(request: ChatRequest):
                         context = {
                             "raw_request": message,
                             "session_id": session_id,
-                            "vm_request": session.vm_request.dict() if hasattr(session.vm_request, 'dict') else session.vm_request
+                            "vm_request": (
+                                session.vm_request.model_dump() if hasattr(session.vm_request, 'model_dump')
+                                else (session.vm_request.dict() if hasattr(session.vm_request, 'dict') else session.vm_request)
+                            )
                         }
                         provision_result = await gce_agent.create_instance(context)
                         
@@ -555,7 +651,10 @@ async def answer_clarification(request: AnswerRequest):
         session = AgentSession(
             session_id=request.session_id,
             state=ConversationState.GATHERING_INFO,  # Use GATHERING_INFO instead of CLARIFYING
-            current_vm_request=legacy_session.vm_request.dict() if hasattr(legacy_session.vm_request, 'dict') else legacy_session.vm_request,
+            current_vm_request=(
+                legacy_session.vm_request.model_dump() if hasattr(legacy_session.vm_request, 'model_dump')
+                else (legacy_session.vm_request.dict() if hasattr(legacy_session.vm_request, 'dict') else legacy_session.vm_request)
+            ),
             conversation_history=[]
         )
     
@@ -570,7 +669,23 @@ async def answer_clarification(request: AnswerRequest):
         normalized_vm = {}
         for key, value in current_vm.items():
             normalized_vm[key] = normalize_vm_field_value(key, value)
-        vm_request_obj = VMRequest(**normalized_vm)
+        try:
+            vm_request_obj = VMRequest(**normalized_vm)
+        except ValidationError as e:
+            # If the error is specifically for 'id' (email), drop it and continue
+            errs = getattr(e, 'errors', lambda: [])()
+            id_error = False
+            for err in errs:
+                loc = err.get('loc')
+                if (isinstance(loc, (list, tuple)) and 'id' in loc) or loc == 'id':
+                    id_error = True
+                    break
+            if id_error:
+                logger.warning("[API] Invalid requestor email provided; removing 'id' and continuing clarification flow")
+                normalized_vm.pop('id', None)
+                vm_request_obj = VMRequest(**normalized_vm)
+            else:
+                raise
     else:
         vm_request_obj = current_vm
     
@@ -581,11 +696,11 @@ async def answer_clarification(request: AnswerRequest):
         'asked_fields': asked_fields
     }
     
-    # Update VM request with answers
+    # Update VM request with sanitized answers
     clarification_agent = ClarificationAgent(context=context)
     updated_vm_request = await clarification_agent.process_answers(
         vm_request_obj,
-        request.answers
+        sanitize_answers(request.answers)
     )
     
     # Store updated asked_fields in session metadata
@@ -593,7 +708,10 @@ async def answer_clarification(request: AnswerRequest):
         session.metadata['asked_fields'] = context.get('asked_fields', [])
     
     # Update session with new VM request
-    session.current_vm_request = updated_vm_request.dict() if hasattr(updated_vm_request, 'dict') else updated_vm_request
+    session.current_vm_request = (
+        updated_vm_request.model_dump() if hasattr(updated_vm_request, 'model_dump')
+        else (updated_vm_request.dict() if hasattr(updated_vm_request, 'dict') else updated_vm_request)
+    )
     
     # Save the updated session
     await save_session(session)
@@ -619,7 +737,10 @@ async def answer_clarification(request: AnswerRequest):
         context = {
             "raw_request": session.conversation_history[0].content if session.conversation_history else "",
             "session_id": request.session_id,
-            "vm_request": updated_vm_request.dict() if hasattr(updated_vm_request, 'dict') else updated_vm_request
+            "vm_request": (
+                updated_vm_request.model_dump() if hasattr(updated_vm_request, 'model_dump')
+                else (updated_vm_request.dict() if hasattr(updated_vm_request, 'dict') else updated_vm_request)
+            )
         }
         provision_result = await gce_agent.create_instance(context)
         
@@ -688,7 +809,9 @@ async def get_session_status(session_id: str):
         "session_id": session_id,
         "status": session.status,
         "created_at": session.created_at.isoformat(),
-        "vm_request": session.vm_request.dict(),
+        "vm_request": session.vm_request.model_dump() if hasattr(session.vm_request, 'model_dump') else (
+            session.vm_request.dict() if hasattr(session.vm_request, 'dict') else session.vm_request
+        ),
         "taxi_payload": session.taxi_payload,
         "taxi_response": session.taxi_response
     }
@@ -826,27 +949,38 @@ async def chat_stream(request: Request, message: str, session_id: Optional[str] 
                             for key, value in partial_data.items():
                                 if value is not None and hasattr(session.vm_request, key):
                                     normalized_value = normalize_vm_field_value(key, value)
-                                    setattr(session.vm_request, key, normalized_value)
+                                    try:
+                                        setattr(session.vm_request, key, normalized_value)
+                                    except (ValueError, ValidationError):
+                                        logger.warning(f"[API] Ignoring invalid value for {key}: {normalized_value}")
                         
                         session.status = "gathering_info"
                         legacy_sessions[session_id] = session
                         
-                        # Format questions for client (handle both string and dict formats)
+                        # Format questions for client (handle both string and dict formats) with canonical field inference
                         formatted_questions = []
                         for q in questions:
                             if isinstance(q, str):
-                                # Simple string question (from GCE Specialist)
-                                field = q.split(" ")[0].lower() if q else "please"
+                                # Infer canonical field (avoid mapping to 'which')
+                                inferred_field = infer_field_from_question(q)
+                                field = inferred_field or ("machineType" if (q and "machine" in q.lower()) else "")
                                 formatted_questions.append({
-                                    "field": field,
+                                    "field": field if field else "please",
                                     "question": str(q),  # Ensure it's a string
                                     "description": ""
                                 })
                             elif isinstance(q, dict):
                                 # Dictionary question (from Clarification Agent)
+                                question_text = q.get("question", "Please provide this information.")
+                                fld = str(q.get("field", "") or "").strip()
+                                if fld not in CANONICAL_VM_FIELDS:
+                                    inferred = infer_field_from_question(question_text)
+                                    if not inferred and "machine" in question_text.lower():
+                                        inferred = "machineType"
+                                    fld = inferred or (fld if fld else "")
                                 formatted_questions.append({
-                                    "field": q.get("field", "please"),
-                                    "question": q.get("question", "Please provide this information."),
+                                    "field": fld if fld else "please",
+                                    "question": question_text,
                                     "description": q.get("description", "")
                                 })
                             # Skip any other types (None, etc.)
@@ -1048,7 +1182,9 @@ async def confirm_submission(request: ConfirmRequest):
             context = {
                 "raw_request": f"Provision VM with confirmed payload",
                 "session_id": request.session_id,
-                "vm_request": vm_request.dict() if hasattr(vm_request, 'dict') else vm_request
+                "vm_request": vm_request.model_dump() if hasattr(vm_request, 'model_dump') else (
+                    vm_request.dict() if hasattr(vm_request, 'dict') else vm_request
+                )
             }
             provision_result = await gce_agent.create_instance(context)
             
@@ -1179,7 +1315,7 @@ async def get_learned_patterns(session_id: str):
         return {
             "session_id": session_id,
             "agent_patterns": patterns_by_agent,
-            "session_patterns": [p.dict() for p in session_patterns],
+            "session_patterns": [p.model_dump() if hasattr(p, 'model_dump') else (p.dict() if hasattr(p, 'dict') else p) for p in session_patterns],
             "pattern_count": sum(len(p) for p in patterns_by_agent.values()) + len(session_patterns)
         }
         
@@ -1299,7 +1435,7 @@ async def get_improvement_suggestions(agent_name: str):
         
         return {
             "agent": agent_name,
-            "suggestions": [s.dict() for s in suggestions],
+            "suggestions": [s.model_dump() if hasattr(s, 'model_dump') else (s.dict() if hasattr(s, 'dict') else s) for s in suggestions],
             "suggestion_count": len(suggestions),
             "generated_at": datetime.now().isoformat()
         }

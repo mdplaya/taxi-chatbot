@@ -1,0 +1,37 @@
+{
+  "resourceMetadata": {
+    "appIdentity": {
+      "type": "cvsappid",
+      "value": "APM0015867"
+    },
+    "appEnvironment": "NONPROD",
+    "appEnvironmentSubtype": "dev",
+    "lineOfBusiness": "RETAIL",
+    "costCenter": "12345",
+    "sharedEmailAddress": "TAXIAutomation@CVShealth.com"
+  },
+  "project": "CORP-dev-broc-sechub-vpc",
+  "networkProject": "CVS-securehub-prod",
+  "network": "VPC-aacvs-hub-trusted-nonprod-1",
+  "subnet": "sn-aacvs-use4-CORP-dev-broc-sechub-vpc-testing",
+  "zone": "US-east4-a",
+  "os": "LINUX_RHEL8",
+  "useType": "app",
+  "machineType": "n1-STANDARD-1",
+  "description": "This is a test instance for events",
+  "additionalDisks": [
+    {
+      "diskName": "req-DISK",
+      "diskSize": 100,
+      "vgName": "app_VG"
+    }
+  ],
+  "options": {
+    "dryRun": false,
+    "requestSource": "ISTS",
+    "requestor": {
+        "userType": "EMAIL",
+        "id": "Michael.Mueller2@CVSHealth.com"
+    }
+  }
+}
