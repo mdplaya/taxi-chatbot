@@ -375,22 +375,7 @@ class ClarificationAgent(BaseAgent):
             if not value:
                 continue
             
-            # For strict fields like machineType, do NOT auto-correct using LLM.
-            # Only accept deterministic normalization if it already yields a valid value.
-            if field == "machineType":
-                val = str(value) if value is not None else ""
-                normalized_raw = val.lower().replace('_', '-').replace(' ', '-')
-                # Validate against catalog; if invalid, raise and let API turn it into a question
-                if not is_valid_machine_type(normalized_raw):
-                    logger.error(f"[Clarification] Invalid value for machineType: {normalized_raw}")
-                    raise ValueError(f"Invalid value for machineType: {normalized_raw}")
-                # Valid as provided after deterministic normalization
-                setattr(vm_request, field, normalized_raw)
-                self.clarification_context["confirmed_values"][field] = normalized_raw
-                logger.info(f"[Clarification] Set {field} = {normalized_raw}")
-                continue
-
-            # For other fields, apply error correction as usual
+            # Apply error correction (LLM-assisted) for all fields
             correction_result = await self.error_correction.detect_and_correct(
                 value,
                 {"field": field, "vm_request": vm_request.model_dump()}
@@ -417,7 +402,9 @@ class ClarificationAgent(BaseAgent):
                         setattr(vm_request, field, OS(normalized))
                     elif field == "useType":
                         setattr(vm_request, field, UseType(normalized))
-                    # machineType is handled earlier with strict guard
+                    elif field == "machineType":
+                        # Accept any supported GCP machine type string
+                        setattr(vm_request, field, normalized)
                     else:
                         setattr(vm_request, field, normalized)
                     
