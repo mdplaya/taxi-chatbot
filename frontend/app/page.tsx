@@ -386,7 +386,7 @@ export default function Chat() {
                       </span>
                     </div>
                   ) : msg.type === 'questions' ? (
-                    <div className="space-y-3">
+                    <div className="space-y-3 animate-in fade-in-50 slide-in-from-bottom-2 duration-300">
                       {(() => {
                         const shown = msg.questions && msg.questions.length ? [msg.questions[0]] : []
                         const meta = groupMetaFor(shown)
@@ -467,62 +467,63 @@ export default function Chat() {
               </div>
             )}
             
+            {/* Sticky centered chatbox */}
+            <div className="sticky bottom-0 left-0 right-0 bg-white/90 backdrop-blur supports-[backdrop-filter]:bg-white/70 pt-4">
+              <div className="flex flex-col items-center gap-2">
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setProvider(prev => (prev === 'gcp' ? null : 'gcp'))}
+                    className={`px-3 py-1 rounded-full text-sm border inline-flex items-center gap-2 transition-colors ${
+                      provider === 'gcp' ? 'bg-green-600 text-white border-green-600' : 'bg-white text-gray-800 border-gray-300 hover:bg-gray-50'
+                    }`}
+                    title={provider === 'gcp' ? 'GCP selected. Click to unset.' : 'Deploy to Google Cloud Platform'}
+                  >
+                    <span className="w-2 h-2 rounded-full bg-current"></span>
+                    GCP
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setProvider(prev => (prev === 'azure' ? null : 'azure'))}
+                    className={`px-3 py-1 rounded-full text-sm border inline-flex items-center gap-2 transition-colors ${
+                      provider === 'azure' ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-800 border-gray-300 hover:bg-gray-50'
+                    }`}
+                    title={provider === 'azure' ? 'Azure selected. Click to unset.' : 'Deploy to Microsoft Azure'}
+                  >
+                    Azure
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setProvider(prev => (prev === 'onprem' ? null : 'onprem'))}
+                    className={`px-3 py-1 rounded-full text-sm border inline-flex items-center gap-2 transition-colors ${
+                      provider === 'onprem' ? 'bg-gray-700 text-white border-gray-700' : 'bg-white text-gray-800 border-gray-300 hover:bg-gray-50'
+                    }`}
+                    title={provider === 'onprem' ? 'On‑Prem selected. Click to unset.' : 'Deploy to On‑Prem'}
+                  >
+                    OnPrem
+                  </button>
+                </div>
+                <div className="flex items-center gap-2 w-full sm:w-[640px]">
+                  <input
+                    type="text"
+                    value={input}
+                    onChange={(e) => setInput(e.target.value)}
+                    onKeyPress={(e) => e.key === 'Enter' && !loading && sendMessage()}
+                    placeholder="Ask anything"
+                    disabled={loading}
+                    className="flex-1 px-4 py-3 rounded-xl bg-gray-50 border border-gray-200 focus:outline-none focus:ring-2 focus:ring-gray-300 text-gray-900"
+                  />
+                  <button
+                    onClick={sendMessage}
+                    disabled={loading || !input.trim()}
+                    className="px-4 py-2 rounded-xl bg-gray-900 text-white hover:bg-black disabled:opacity-50"
+                  >
+                    Send
+                  </button>
+                </div>
+              </div>
+            </div>
             <div ref={messagesEndRef} />
-          </div>
-          
-          {/* Centered chatbox below the message stream */}
-          <div className="p-6 border-t flex flex-col items-center gap-2">
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => setProvider(prev => (prev === 'gcp' ? null : 'gcp'))}
-                className={`px-3 py-1 rounded-full text-sm border inline-flex items-center gap-2 transition-colors ${
-                  provider === 'gcp' ? 'bg-green-600 text-white border-green-600' : 'bg-white text-gray-800 border-gray-300 hover:bg-gray-50'
-                }`}
-                title={provider === 'gcp' ? 'GCP selected. Click to unset.' : 'Deploy to Google Cloud Platform'}
-              >
-                <span className="w-2 h-2 rounded-full bg-current"></span>
-                GCP
-              </button>
-              <button
-                type="button"
-                onClick={() => setProvider(prev => (prev === 'azure' ? null : 'azure'))}
-                className={`px-3 py-1 rounded-full text-sm border inline-flex items-center gap-2 transition-colors ${
-                  provider === 'azure' ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-800 border-gray-300 hover:bg-gray-50'
-                }`}
-                title={provider === 'azure' ? 'Azure selected. Click to unset.' : 'Deploy to Microsoft Azure'}
-              >
-                Azure
-              </button>
-              <button
-                type="button"
-                onClick={() => setProvider(prev => (prev === 'onprem' ? null : 'onprem'))}
-                className={`px-3 py-1 rounded-full text-sm border inline-flex items-center gap-2 transition-colors ${
-                  provider === 'onprem' ? 'bg-gray-700 text-white border-gray-700' : 'bg-white text-gray-800 border-gray-300 hover:bg-gray-50'
-                }`}
-                title={provider === 'onprem' ? 'On‑Prem selected. Click to unset.' : 'Deploy to On‑Prem'}
-              >
-                OnPrem
-              </button>
-            </div>
-            <div className="flex items-center gap-2 w-full sm:w-[640px]">
-              <input
-                type="text"
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyPress={(e) => e.key === 'Enter' && !loading && sendMessage()}
-                placeholder="Ask anything"
-                disabled={loading}
-                className="flex-1 px-4 py-3 rounded-xl bg-gray-50 border border-gray-200 focus:outline-none focus:ring-2 focus:ring-gray-300 text-gray-900"
-              />
-              <button
-                onClick={sendMessage}
-                disabled={loading || !input.trim()}
-                className="px-4 py-2 rounded-xl bg-gray-900 text-white hover:bg-black disabled:opacity-50"
-              >
-                Send
-              </button>
-            </div>
           </div>
         </div>
         
