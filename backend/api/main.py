@@ -320,8 +320,20 @@ async def chat(request: ChatRequest, raw_request: Request):
         # Get current mode
         current_mode = llm_manager.get_mode()
         
-        # Process through orchestrator
-        orchestrator_result = await orchestrator.process(request.message, session_id)
+        # Build context (allow provider hint from UI)
+        provider_hint = None
+        try:
+            provider_hint = (request.context or {}).get('provider') if request.context else None
+        except Exception:
+            provider_hint = None
+        
+        # Process through orchestrator with structured input
+        orch_input = {
+            "message": request.message,
+            "session_id": session_id,
+            "provider": provider_hint
+        }
+        orchestrator_result = await orchestrator.process(orch_input, session_id)
         
         # Ensure we have a valid result
         if not isinstance(orchestrator_result, dict):
@@ -803,7 +815,7 @@ async def list_sessions():
     }
 
 @app.get("/chat/stream")
-async def chat_stream(request: Request, message: str, session_id: Optional[str] = None):
+async def chat_stream(request: Request, message: str, session_id: Optional[str] = None, provider: Optional[str] = None):
     """
     SSE endpoint for streaming chat with real-time progress updates
     """
@@ -853,7 +865,8 @@ async def chat_stream(request: Request, message: str, session_id: Optional[str] 
                 "Analyzing your request...", 10, "started"
             )
             
-            orchestrator_result = await orchestrator.process(message, session_id)
+            orch_input = {"message": message, "session_id": session_id, "provider": provider}
+            orchestrator_result = await orchestrator.process(orch_input, session_id)
             
             # Handle response based on next agent
             if orchestrator_result["next_agent"] == "compute":

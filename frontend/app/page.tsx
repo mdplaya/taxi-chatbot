@@ -346,13 +346,50 @@ export default function Chat() {
     <div className="min-h-screen bg-white">
       <StatusBadge mode={systemMode} />
       <div className="max-w-4xl mx-auto p-4">
-        <div className="bg-white rounded-lg shadow-lg">
-          <div className="bg-blue-600 text-white p-4 rounded-t-lg">
-            <h1 className="text-2xl font-bold">🚀 TAXI Infrastructure Bot</h1>
-            <p className="text-sm opacity-90">Provision VMs across cloud providers</p>
-          </div>
+        <div className="bg-white rounded-lg shadow-sm">
+          {/* Removed blue header bar */}
           
           <div className="h-[500px] overflow-y-auto p-4 space-y-4">
+            {/* Always show a single chat input at the top */}
+            <div className="flex flex-col items-center justify-center pb-4">
+              <h1 className="text-xl font-semibold mb-4">TAXI Infrastructure Bot</h1>
+              {/* Provider pills (not inside a box) */}
+              <div className="mb-2">
+                <button
+                  type="button"
+                  onClick={() => setProvider(prev => (prev === 'gcp' ? null : 'gcp'))}
+                  className={`px-3 py-1 rounded-full text-sm border inline-flex items-center gap-2 transition-colors ${
+                    provider === 'gcp'
+                      ? 'bg-green-600 text-white border-green-600'
+                      : 'bg-white text-gray-800 border-gray-300 hover:bg-gray-50'
+                  }`}
+                  title={provider === 'gcp' ? 'GCP selected. Click to unset.' : 'Deploy to Google Cloud Platform'}
+                >
+                  <span className="w-2 h-2 rounded-full bg-current"></span>
+                  GCP
+                </button>
+                <button disabled className="ml-2 px-3 py-1 rounded-full text-sm border bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed" title="Azure support coming soon">Azure</button>
+                <button disabled className="ml-2 px-3 py-1 rounded-full text-sm border bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed" title="On‑Prem support coming soon">OnPrem</button>
+              </div>
+              <div className="flex items-center gap-2 w-full sm:w-[640px]">
+                <input
+                  type="text"
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyPress={(e) => e.key === 'Enter' && !loading && sendMessage()}
+                  placeholder="Ask anything"
+                  disabled={loading}
+                  className="flex-1 px-4 py-3 rounded-xl bg-gray-50 border border-gray-200 focus:outline-none focus:ring-2 focus:ring-gray-300 text-gray-900"
+                />
+                <button
+                  onClick={sendMessage}
+                  disabled={loading || !input.trim()}
+                  className="px-4 py-2 rounded-xl bg-gray-900 text-white hover:bg-black disabled:opacity-50"
+                >
+                  Send
+                </button>
+              </div>
+            </div>
             {messages.length === 0 && (
               <div className="flex flex-col items-center justify-center pt-12 pb-6">
                 <h2 className="text-2xl font-semibold mb-6">TAXI Infrastructure Bot</h2>
@@ -422,7 +459,7 @@ export default function Chat() {
               <div key={msg.id} className={`flex ${msg.type === 'user' ? 'justify-end' : 'justify-start'}`}>
                 <div className={`max-w-lg rounded-lg p-3 ${
                   msg.type === 'user' 
-                    ? 'bg-blue-600 text-white' 
+                    ? 'bg-gray-900 text-white' 
                     : 'bg-gray-100 text-gray-800'
                 }`}>
                   {msg.type === 'divider' ? (
@@ -528,46 +565,7 @@ export default function Chat() {
             <div ref={messagesEndRef} />
           </div>
           
-          <div className="p-4 border-t">
-            {/* Cloud provider pills above input while chatting */}
-            {messages.length > 0 && (
-              <div className="mb-2 flex items-center"><div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => setProvider(prev => (prev === 'gcp' ? null : 'gcp'))}
-                  className={`px-3 py-1 rounded-full text-sm border inline-flex items-center gap-2 transition-colors ${
-                    provider === 'gcp'
-                      ? 'bg-green-600 text-white border-green-600'
-                      : 'bg-white text-gray-800 border-gray-300 hover:bg-gray-50'
-                  }`}
-                  title={provider === 'gcp' ? 'GCP selected. Click to unset.' : 'Deploy to Google Cloud Platform'}
-                >
-                  <span className="w-2 h-2 rounded-full bg-current"></span>
-                  GCP
-                </button>
-                <button disabled className="px-3 py-1 rounded-full text-sm border bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed" title="Azure support coming soon">Azure</button>
-                <button disabled className="px-3 py-1 rounded-full text-sm border bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed" title="On‑Prem support coming soon">OnPrem</button>
-              </div></div>
-            )}
-            <div className="flex space-x-2">
-              <input
-                type="text"
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyPress={(e) => e.key === 'Enter' && !loading && sendMessage()}
-                placeholder="Ask anything"
-                disabled={loading}
-                className="flex-1 px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-gray-300 text-gray-900 bg-white"
-              />
-              <button
-                onClick={sendMessage}
-                disabled={loading || !input.trim()}
-                className="px-6 py-2 bg-gray-900 text-white rounded-lg hover:bg-black disabled:opacity-50"
-              >
-                Send
-              </button>
-            </div>
-          </div>
+          {/* Removed bottom chat input to keep a single input box */}
         </div>
         
         {sessionId && (

@@ -81,6 +81,7 @@ class OrchestratorAgent(BaseAgent):
         NO pattern matching allowed
         """
         # Handle both string and dict inputs for compatibility
+        provider_hint = None
         if isinstance(context, str):
             user_input = context
             conversation_history = []
@@ -88,6 +89,11 @@ class OrchestratorAgent(BaseAgent):
             user_input = context.get("message", context.get("raw_request", ""))
             session_id = context.get("session_id", session_id)
             conversation_history = context.get("conversation_history", [])
+            # Optional provider hint passed from UI/API
+            try:
+                provider_hint = context.get("provider") or (context.get("context", {}) or {}).get("provider")
+            except Exception:
+                provider_hint = None
         else:
             user_input = str(context)
             conversation_history = []
@@ -244,6 +250,9 @@ class OrchestratorAgent(BaseAgent):
                     extracted["provider"] = provider
                     break
             # Don't set a default provider - let clarification agent handle it
+            # Respect explicit provider hint from API/UI if present
+            if provider_hint and provider_hint in ["gcp", "aws", "azure", "onprem"]:
+                extracted["provider"] = provider_hint
             
             # Comprehensive environment detection with subtype (business metadata only)
             env_keywords = {
@@ -342,7 +351,7 @@ class OrchestratorAgent(BaseAgent):
                 "context": {
                     "intent": "create_compute",
                     "resource_type": "vm",
-                    "provider": extracted.get("provider"),  # No default - will be None if not specified
+                    "provider": extracted.get("provider"),  # Prefer detected or hinted provider
                     "raw_request": processed_input,
                     "session_id": session_id,
                     # Pass business metadata and back-compat technical hints
