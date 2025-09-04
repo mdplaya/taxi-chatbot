@@ -331,8 +331,14 @@ class OrchestratorAgent(BaseAgent):
                 else:
                     technical_hints[key] = value
             
+            # Decide initial agent based on Business completeness (Business -> Resource -> Specialist)
+            required_business = ["id", "lineOfBusiness", "appEnvironment"]
+            missing_business = [f for f in required_business if not business_metadata.get(f)]
+
+            next_agent = "clarification" if missing_business else "compute"
+
             routing_decision = {
-                "next_agent": "compute",
+                "next_agent": next_agent,
                 "context": {
                     "intent": "create_compute",
                     "resource_type": "vm",
@@ -351,13 +357,20 @@ class OrchestratorAgent(BaseAgent):
                         **({"os": technical_hints.get("os")} if technical_hints.get("os") else {}),
                     },
                     "business_metadata": business_metadata,  # Pass business metadata separately
-                    "missing_info": [],
+                    "missing_info": missing_business,
                     "conversation_history": [],
                     "confidence": 0.95
                 },
-                "reasoning": f"VM request detected - routing to compute agent. Business: {list(business_metadata.keys())}, hints: {list(technical_hints.keys())}",
+                "reasoning": (
+                    "Missing business metadata; asking Business first"
+                    if next_agent == "clarification"
+                    else f"Business complete; routing to compute. Hints: {list(technical_hints.keys())}"
+                ),
                 "mode": "fast_path"
             }
+
+            # Return early on fast path to avoid unnecessary LLM calls
+            return routing_decision
             reasoning_chain = []
             logger.info(f"[Orchestrator] Fast path extracted: {extracted}")
             
