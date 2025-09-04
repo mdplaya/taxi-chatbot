@@ -141,9 +141,28 @@ class ClarificationAgent(BaseAgent):
             confirmation = await self._confirm_before_action(vm_request, context)
             return confirmation
         
-        # Generate natural questions
+        # Enforce group-by-group questioning: Business -> Resource -> Specialist
+        business_fields = ["lineOfBusiness", "id", "appEnvironment", "appEnvironmentSubtype", "costCenter"]
+        resource_fields = ["useType", "os"]
+        specialist_fields = ["zone", "machineType"]
+
+        asked = self.clarification_context["asked_fields"]
+        # filter out already asked
+        remaining = [f for f in missing_fields if f not in asked]
+
+        def first_nonempty_group(fields):
+            groups = [business_fields, resource_fields, specialist_fields]
+            for g in groups:
+                grp = [f for f in fields if f in g]
+                if grp:
+                    return grp
+            return []
+
+        group_missing = first_nonempty_group(remaining)
+
+        # Generate natural questions only for the current group
         questions = await self._generate_natural_questions(
-            missing_fields,
+            group_missing if group_missing else remaining,
             vm_request,
             context
         )
