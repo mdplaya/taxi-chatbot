@@ -359,13 +359,15 @@ export default function Chat() {
             {/* Message stream only; chat input rendered below */}
             {false && null}
             
-            {messages.map(msg => (
-              <div key={msg.id} className={`flex ${msg.type === 'user' ? 'justify-end' : 'justify-start'}`}>
-                <div className={`max-w-lg rounded-lg p-3 ${
-                  msg.type === 'user' 
-                    ? 'bg-blue-600 text-white' 
-                    : 'bg-gray-100 text-gray-800'
-                }`}>
+            {messages.map(msg => {
+              const isUser = msg.type === 'user'
+              const isQuestions = msg.type === 'questions'
+              const wrapperColor = isUser
+                ? 'bg-blue-600 text-white'
+                : (isQuestions ? 'bg-blue-50 text-blue-900 border border-blue-200' : 'bg-gray-100 text-gray-800')
+              return (
+              <div key={msg.id} className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
+                <div className={`max-w-xl rounded-2xl px-4 py-3 ${wrapperColor}`}>
                   {msg.type === 'divider' ? (
                     <div className="text-center">
                       <span
@@ -385,7 +387,7 @@ export default function Chat() {
                         {msg.label}
                       </span>
                     </div>
-                  ) : msg.type === 'questions' ? (
+                  ) : isQuestions ? (
                     <div className="space-y-3 animate-in fade-in-50 slide-in-from-bottom-2 duration-300">
                       {(() => {
                         const shown = msg.questions && msg.questions.length ? [msg.questions[0]] : []
@@ -440,7 +442,7 @@ export default function Chat() {
                   )}
                 </div>
               </div>
-            ))}
+              )})}
             
             {loading && (
               <div className="flex justify-start">
@@ -474,7 +476,7 @@ export default function Chat() {
       {/* Fixed overlay chatbox independent of inner scroll */}
       <div className={`fixed left-0 right-0 ${messages.length > 0 ? 'top-[75vh] translate-y-0 opacity-100' : 'top-1/2 -translate-y-1/2 opacity-90'}
         border-t bg-gradient-to-t from-white/95 to-white/60 backdrop-blur supports-[backdrop-filter]:bg-white/70
-        shadow-[0_-28px_80px_rgba(0,0,0,0.22)] transition-all duration-1000 ease-out will-change-[top,transform,opacity]`}>
+        shadow-[0_-32px_96px_rgba(0,0,0,0.25)] transition-all duration-[1600ms] ease-[cubic-bezier(0.16,1,0.3,1)] will-change-[top,transform,opacity]`}>
         <div className="max-w-4xl mx-auto px-4 py-4">
           <div className="flex flex-col items-center gap-2">
             <h1 className="text-xl font-semibold">TAXI Infrastructure Bot</h1>
