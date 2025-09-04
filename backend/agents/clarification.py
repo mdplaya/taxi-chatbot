@@ -210,6 +210,11 @@ class ClarificationAgent(BaseAgent):
         if not new_fields:
             return []
         
+        # Define ordering guidance: Business -> Resource -> Specialist
+        business_fields = ["lineOfBusiness", "id", "appEnvironment", "appEnvironmentSubtype", "costCenter"]
+        resource_fields = ["useType", "os"]
+        specialist_fields = ["zone", "machineType"]
+
         question_prompt = f"""
         Generate natural, conversational questions for missing information:
         
@@ -218,6 +223,13 @@ class ClarificationAgent(BaseAgent):
         User's original request: {context.get('raw_request', '')}
         Conversation history: {json.dumps(context.get('conversation_history', [])[-5:])}
         
+        IMPORTANT ORDERING:
+        - Ask Business questions first (any order among them): {json.dumps(business_fields)}
+        - Then ask Resource questions (any order among them): {json.dumps(resource_fields)}
+        - Then ask Resource Specialist questions (any order among them): {json.dumps(specialist_fields)}
+        Only include questions for fields present in Missing fields.
+        At most one question per field.
+
         For each field, create a question that:
         1. Feels natural and conversational
         2. Provides helpful context or examples
@@ -264,18 +276,10 @@ class ClarificationAgent(BaseAgent):
         except Exception as e:
             logger.error(f"Error generating questions: {e}")
             questions = []
-        
-        # Deterministic fallback for critical fields when LLM is unavailable
-        if not questions and new_fields:
-            fallback_map = {
-                "id": {
-                    "field": "id",
-                    "question": "What email should we use as the requestor ID?",
-                    "suggestions": ["user@example.com"],
-                    "why_needed": "We need an email to track who requested this.",
-                    "allows_custom": True
-                }
-            }
+
+        # Optional deterministic fallback disabled by default. To enable, set env CLARIFICATION_DETERMINISTIC_FALLBACKS=true
+        if not questions and new_fields and os.getenv('CLARIFICATION_DETERMINISTIC_FALLBACKS', 'false').lower() == 'true':
+            fallback_map = {}
             for f in new_fields:
                 if f in fallback_map:
                     questions.append(fallback_map[f])
@@ -306,6 +310,14 @@ class ClarificationAgent(BaseAgent):
             if field_name:
                 self.clarification_context["asked_fields"].add(field_name)
         
+        # Enforce group ordering on the final list (Business -> Resource -> Specialist)
+        simplified_questions = self._reorder_questions(
+            simplified_questions,
+            business_fields,
+            resource_fields,
+            specialist_fields,
+        )
+
         # Learn from question generation
         self.memory.learned_patterns.append({
             "type": "question_generation",
@@ -319,6 +331,28 @@ class ClarificationAgent(BaseAgent):
         context['asked_fields'] = list(self.clarification_context["asked_fields"])
         
         return simplified_questions
+
+    def _reorder_questions(
+        self,
+        questions: List[Dict[str, str]],
+        business_fields: List[str],
+        resource_fields: List[str],
+        specialist_fields: List[str],
+    ) -> List[Dict[str, str]]:
+        """Reorder questions to Business -> Resource -> Specialist while preserving in-group order."""
+        group_index: Dict[str, int] = {}
+        for f in business_fields:
+            group_index[f] = 0
+        for f in resource_fields:
+            group_index[f] = 1
+        for f in specialist_fields:
+            group_index[f] = 2
+
+        def key_fn(q: Dict[str, str]) -> int:
+            return group_index.get(q.get("field", ""), 3)
+
+        # Python sort is stable; preserves relative order within the same group
+        return sorted(questions, key=key_fn)
     
     async def _check_for_corrections(self, vm_request: VMRequest, context: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
