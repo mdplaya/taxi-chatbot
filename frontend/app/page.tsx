@@ -46,6 +46,7 @@ export default function Chat() {
   const [systemMode, setSystemMode] = useState<'online' | 'offline' | null>(null)
   const [progressMessage, setProgressMessage] = useState<string>('')
   const [progressPercentage, setProgressPercentage] = useState<number>(0)
+  const [provider, setProvider] = useState<'gcp' | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const eventSourceRef = useRef<EventSource | null>(null)
   const lastGroupRef = useRef<string | null>(null)
@@ -123,6 +124,20 @@ export default function Chat() {
     return () => clearInterval(interval)
   }, [API_URL])
   
+  // Append provider hint when GCP is toggled and no provider is mentioned
+  const withProviderHint = (text: string): string => {
+    if (!provider) return text
+    const t = (text || '').toLowerCase()
+    const mentionsProvider = [
+      'gcp', 'google cloud', 'google', 'gce',
+      'aws', 'amazon', 'ec2',
+      'azure', 'microsoft',
+      'on-prem', 'onprem', 'datacenter', 'vmware'
+    ].some(k => t.includes(k))
+    if (mentionsProvider) return text
+    return text.trim().length ? `${text.trim()} in GCP` : 'in GCP'
+  }
+
   const sendMessage = async () => {
     if (!input.trim()) return
     
@@ -152,7 +167,7 @@ export default function Chat() {
         
         // Create SSE connection
         const params = new URLSearchParams({
-          message: currentInput,
+          message: withProviderHint(currentInput),
           session_id: sessionId || ''
         })
         
@@ -242,7 +257,7 @@ export default function Chat() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          message: messageText,
+          message: withProviderHint(messageText),
           session_id: sessionId
         })
       })
@@ -328,7 +343,7 @@ export default function Chat() {
   }
   
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-white">
       <StatusBadge mode={systemMode} />
       <div className="max-w-4xl mx-auto p-4">
         <div className="bg-white rounded-lg shadow-lg">
@@ -339,14 +354,67 @@ export default function Chat() {
           
           <div className="h-[500px] overflow-y-auto p-4 space-y-4">
             {messages.length === 0 && (
-              <div className="text-center text-gray-500 mt-8">
-                <p className="text-lg mb-2">Welcome! I can help you provision infrastructure.</p>
-                <p className="text-sm">Try: "I want a VM in GCP" or "Create a Linux server for development"</p>
-                {systemMode === 'offline' && (
-                  <p className="text-xs mt-2 text-yellow-600">
-                    Note: Running in offline mode. AI features are disabled.
-                  </p>
-                )}
+              <div className="flex flex-col items-center justify-center pt-12 pb-6">
+                <h2 className="text-2xl font-semibold mb-6">TAXI Infrastructure Bot</h2>
+                <div className="w-full sm:w-[640px]">
+                  <div className="rounded-2xl border border-gray-200 shadow-sm p-3 bg-white">
+                    <div className="flex items-center justify-between mb-2">
+                      {/* Cloud provider pills */}
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setProvider(prev => (prev === 'gcp' ? null : 'gcp'))}
+                          className={`px-3 py-1 rounded-full text-sm border inline-flex items-center gap-2 transition-colors ${
+                            provider === 'gcp'
+                              ? 'bg-green-600 text-white border-green-600'
+                              : 'bg-white text-gray-800 border-gray-300 hover:bg-gray-50'
+                          }`}
+                          title={provider === 'gcp' ? 'GCP selected. Click to unset.' : 'Deploy to Google Cloud Platform'}
+                        >
+                          <span className="w-2 h-2 rounded-full bg-current"></span>
+                          GCP
+                        </button>
+                        <button
+                          type="button"
+                          disabled
+                          className="px-3 py-1 rounded-full text-sm border bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed"
+                          title="Azure support coming soon"
+                        >
+                          Azure
+                        </button>
+                        <button
+                          type="button"
+                          disabled
+                          className="px-3 py-1 rounded-full text-sm border bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed"
+                          title="On‑Prem support coming soon"
+                        >
+                          OnPrem
+                        </button>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="text"
+                        value={input}
+                        onChange={(e) => setInput(e.target.value)}
+                        onKeyPress={(e) => e.key === 'Enter' && !loading && sendMessage()}
+                        placeholder="Ask anything"
+                        disabled={loading}
+                        className="flex-1 px-4 py-3 rounded-xl bg-gray-50 border border-gray-200 focus:outline-none focus:ring-2 focus:ring-gray-300 text-gray-900"
+                      />
+                      <button
+                        onClick={sendMessage}
+                        disabled={loading || !input.trim()}
+                        className="px-4 py-2 rounded-xl bg-gray-900 text-white hover:bg-black disabled:opacity-50"
+                      >
+                        Send
+                      </button>
+                    </div>
+                  </div>
+                  {systemMode === 'offline' && (
+                    <p className="text-xs text-center mt-3 text-yellow-700">Running in offline mode; AI features limited.</p>
+                  )}
+                </div>
               </div>
             )}
             
@@ -461,20 +529,40 @@ export default function Chat() {
           </div>
           
           <div className="p-4 border-t">
+            {/* Cloud provider pills above input while chatting */}
+            {messages.length > 0 && (
+              <div className="mb-2 flex items-center"><div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setProvider(prev => (prev === 'gcp' ? null : 'gcp'))}
+                  className={`px-3 py-1 rounded-full text-sm border inline-flex items-center gap-2 transition-colors ${
+                    provider === 'gcp'
+                      ? 'bg-green-600 text-white border-green-600'
+                      : 'bg-white text-gray-800 border-gray-300 hover:bg-gray-50'
+                  }`}
+                  title={provider === 'gcp' ? 'GCP selected. Click to unset.' : 'Deploy to Google Cloud Platform'}
+                >
+                  <span className="w-2 h-2 rounded-full bg-current"></span>
+                  GCP
+                </button>
+                <button disabled className="px-3 py-1 rounded-full text-sm border bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed" title="Azure support coming soon">Azure</button>
+                <button disabled className="px-3 py-1 rounded-full text-sm border bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed" title="On‑Prem support coming soon">OnPrem</button>
+              </div></div>
+            )}
             <div className="flex space-x-2">
               <input
                 type="text"
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyPress={(e) => e.key === 'Enter' && !loading && sendMessage()}
-                placeholder="Type your message..."
+                placeholder="Ask anything"
                 disabled={loading}
-                className="flex-1 px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600 text-gray-900 bg-white"
+                className="flex-1 px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-gray-300 text-gray-900 bg-white"
               />
               <button
                 onClick={sendMessage}
                 disabled={loading || !input.trim()}
-                className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+                className="px-6 py-2 bg-gray-900 text-white rounded-lg hover:bg-black disabled:opacity-50"
               >
                 Send
               </button>
