@@ -169,7 +169,8 @@ export default function Chat() {
         const params = new URLSearchParams({
           message: withProviderHint(currentInput),
           session_id: sessionId || ''
-        })
+        } as any)
+        if (provider) params.set('provider', provider)
         
         const eventSource = new EventSource(`${API_URL}/chat/stream?${params}`)
         eventSourceRef.current = eventSource
@@ -258,7 +259,8 @@ export default function Chat() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           message: withProviderHint(messageText),
-          session_id: sessionId
+          session_id: sessionId,
+          context: provider ? { provider } : undefined
         })
       })
       
@@ -390,70 +392,7 @@ export default function Chat() {
                 </button>
               </div>
             </div>
-            {messages.length === 0 && (
-              <div className="flex flex-col items-center justify-center pt-12 pb-6">
-                <h2 className="text-2xl font-semibold mb-6">TAXI Infrastructure Bot</h2>
-                <div className="w-full sm:w-[640px]">
-                  <div className="rounded-2xl border border-gray-200 shadow-sm p-3 bg-white">
-                    <div className="flex items-center justify-between mb-2">
-                      {/* Cloud provider pills */}
-                      <div className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => setProvider(prev => (prev === 'gcp' ? null : 'gcp'))}
-                          className={`px-3 py-1 rounded-full text-sm border inline-flex items-center gap-2 transition-colors ${
-                            provider === 'gcp'
-                              ? 'bg-green-600 text-white border-green-600'
-                              : 'bg-white text-gray-800 border-gray-300 hover:bg-gray-50'
-                          }`}
-                          title={provider === 'gcp' ? 'GCP selected. Click to unset.' : 'Deploy to Google Cloud Platform'}
-                        >
-                          <span className="w-2 h-2 rounded-full bg-current"></span>
-                          GCP
-                        </button>
-                        <button
-                          type="button"
-                          disabled
-                          className="px-3 py-1 rounded-full text-sm border bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed"
-                          title="Azure support coming soon"
-                        >
-                          Azure
-                        </button>
-                        <button
-                          type="button"
-                          disabled
-                          className="px-3 py-1 rounded-full text-sm border bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed"
-                          title="On‑Prem support coming soon"
-                        >
-                          OnPrem
-                        </button>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <input
-                        type="text"
-                        value={input}
-                        onChange={(e) => setInput(e.target.value)}
-                        onKeyPress={(e) => e.key === 'Enter' && !loading && sendMessage()}
-                        placeholder="Ask anything"
-                        disabled={loading}
-                        className="flex-1 px-4 py-3 rounded-xl bg-gray-50 border border-gray-200 focus:outline-none focus:ring-2 focus:ring-gray-300 text-gray-900"
-                      />
-                      <button
-                        onClick={sendMessage}
-                        disabled={loading || !input.trim()}
-                        className="px-4 py-2 rounded-xl bg-gray-900 text-white hover:bg-black disabled:opacity-50"
-                      >
-                        Send
-                      </button>
-                    </div>
-                  </div>
-                  {systemMode === 'offline' && (
-                    <p className="text-xs text-center mt-3 text-yellow-700">Running in offline mode; AI features limited.</p>
-                  )}
-                </div>
-              </div>
-            )}
+            {false && null}
             
             {messages.map(msg => (
               <div key={msg.id} className={`flex ${msg.type === 'user' ? 'justify-end' : 'justify-start'}`}>
