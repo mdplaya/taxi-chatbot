@@ -47,6 +47,7 @@ export default function Chat() {
   const [progressMessage, setProgressMessage] = useState<string>('')
   const [progressPercentage, setProgressPercentage] = useState<number>(0)
   const [provider, setProvider] = useState<'gcp' | 'azure' | 'onprem' | null>(null)
+  const [placeholder, setPlaceholder] = useState<string>('Ask anything')
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const eventSourceRef = useRef<EventSource | null>(null)
   const lastGroupRef = useRef<string | null>(null)
@@ -91,6 +92,17 @@ export default function Chat() {
       }
     }
     return { key: 'other', label: 'Clarification', bg: 'bg-gray-100', text: 'text-gray-900', tooltip: 'Additional details to proceed.' }
+  }
+
+  // Get the most recent pending question (first field) if any
+  const getPendingQuestion = () => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i]
+      if (m.type === 'questions' && m.questions && m.questions.length) {
+        return m.questions[0]
+      }
+    }
+    return null
   }
   
   useEffect(() => {
@@ -143,19 +155,27 @@ export default function Chat() {
 
   const sendMessage = async () => {
     if (!input.trim()) return
-    
+
     const userMessage: Message = {
       id: Date.now().toString(),
       type: 'user',
       text: input
     }
-    
+
     const currentInput = input
     setMessages(prev => [...prev, userMessage])
     setInput('')
     setLoading(true)
     setProgressMessage('Connecting...')
     setProgressPercentage(0)
+
+    // If there's a pending question, treat this send as an answer
+    const pending = getPendingQuestion()
+    if (pending) {
+      setAnswers({ [pending.field]: currentInput })
+      await submitAnswers()
+      return
+    }
     
     // Check if SSE is supported
     const useSSE = typeof EventSource !== 'undefined'
@@ -208,6 +228,12 @@ export default function Chat() {
           }
           setMessages(prev => [...prev, ...msgs, botMessage])
           setAnswers({})
+          // Update bottom bar placeholder with hint from the first question
+          try {
+            const q = (data.questions && data.questions.length) ? data.questions[0] : null
+            if (q && q.description) setPlaceholder(q.description)
+            else if (q && q.question) setPlaceholder(q.question)
+          } catch {}
           setLoading(false)
           eventSource.close()
         })
@@ -270,12 +296,12 @@ export default function Chat() {
       
       const data = await response.json()
       setSessionId(data.session_id)
-      
+
       // Update mode from response
       if (data.mode) {
         setSystemMode(data.mode)
       }
-      
+
       const meta = data.needs_clarification ? groupMetaFor(data.questions) : null
       const msgs: Message[] = []
       if (meta && meta.label && lastGroupRef.current !== meta.label) {
@@ -291,6 +317,13 @@ export default function Chat() {
       }
 
       setMessages(prev => [...prev, ...msgs, botMessage])
+      // Update placeholder based on clarification state
+      if (data.needs_clarification && data.questions && data.questions.length) {
+        const q = data.questions[0]
+        setPlaceholder(q.description || q.question || 'Type your answer...')
+      } else {
+        setPlaceholder('Ask anything')
+      }
     } catch (error) {
       console.error('Error:', error)
       setMessages(prev => [...prev, {
@@ -319,12 +352,12 @@ export default function Chat() {
       })
       
       const data = await response.json()
-      
+
       // Update mode from response
       if (data.mode) {
         setSystemMode(data.mode)
       }
-      
+
       const meta = data.needs_clarification ? groupMetaFor(data.questions) : null
       const msgs: Message[] = []
       if (meta && meta.label && lastGroupRef.current !== meta.label) {
@@ -341,6 +374,13 @@ export default function Chat() {
 
       setMessages(prev => [...prev, ...msgs, botMessage])
       setAnswers({})
+      // Update placeholder with next question hint or reset
+      if (data.needs_clarification && data.questions && data.questions.length) {
+        const q = data.questions[0]
+        setPlaceholder(q.description || q.question || 'Type your answer...')
+      } else {
+        setPlaceholder('Ask anything')
+      }
     } catch (error) {
       console.error('Error:', error)
     }
@@ -409,21 +449,9 @@ export default function Chat() {
                           <label className="block text-sm font-medium">
                             {q.question}
                           </label>
-                          <input
-                            type="text"
-                            className="w-full px-3 py-2 border rounded-md text-sm"
-                            placeholder={q.description}
-                            onChange={(e) => setAnswers({...answers, [q.field]: e.target.value})}
-                          />
+                          {/* Input removed – user answers via bottom bar */}
                         </div>
                       ))}
-                      <button
-                        onClick={submitAnswers}
-                        disabled={loading}
-                        className="w-full bg-blue-600 text-white py-2 rounded-md hover:bg-blue-700 disabled:opacity-50"
-                      >
-                        Submit Answer
-                      </button>
                     </div>
                   ) : (
                     <>
@@ -519,7 +547,7 @@ export default function Chat() {
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyPress={(e) => e.key === 'Enter' && !loading && sendMessage()}
-                placeholder="Ask anything"
+                placeholder={placeholder}
                 disabled={loading}
                 className="flex-1 px-4 py-3 rounded-xl bg-gray-50 border border-gray-200 focus:outline-none focus:ring-2 focus:ring-gray-300 text-gray-900"
               />
