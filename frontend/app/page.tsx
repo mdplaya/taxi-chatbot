@@ -355,7 +355,7 @@ export default function Chat() {
         <div className="bg-white rounded-lg shadow-sm">
           {/* Removed blue header bar */}
           
-          <div className="h-[500px] overflow-y-auto p-4 space-y-4 pb-40">
+          <div className={`h-[500px] overflow-y-auto p-4 space-y-4 ${messages.length > 0 ? 'pb-[35vh]' : 'pb-40'}` }>
             {/* Message stream only; chat input rendered below */}
             {false && null}
             
@@ -477,8 +477,8 @@ export default function Chat() {
           </div>
         )}
       </div>
-      {/* Fixed sticky chatbox independent of inner scroll */}
-      <div className="fixed bottom-0 left-0 right-0 border-t bg-white/90 backdrop-blur supports-[backdrop-filter]:bg-white/70 shadow-[0_-8px_24px_rgba(0,0,0,0.06)]">
+      {/* Fixed overlay chatbox independent of inner scroll */}
+      <div className={`fixed left-0 right-0 ${messages.length > 0 ? 'top-[75vh]' : 'top-1/2 -translate-y-1/2'} border-t bg-gradient-to-t from-white/95 to-white/60 backdrop-blur supports-[backdrop-filter]:bg-white/70 shadow-[0_-24px_64px_rgba(0,0,0,0.16)]`}>
         <div className="max-w-4xl mx-auto px-4 py-4">
           <div className="flex flex-col items-center gap-2">
             <h1 className="text-xl font-semibold">TAXI Infrastructure Bot</h1>
