@@ -49,6 +49,19 @@ export default function Chat() {
   const eventSourceRef = useRef<EventSource | null>(null)
   
   const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+
+  // Question group banner logic
+  const businessFields = ['lineOfBusiness', 'id', 'appEnvironment', 'appEnvironmentSubtype', 'costCenter']
+  const resourceFields = ['useType', 'os']
+  const specialistFields = ['zone', 'machineType']
+  const groupLabelFor = (qs: Array<{field: string}> | undefined): string => {
+    const fields = (qs || []).map(q => q.field)
+    const anyIn = (group: string[]) => fields.some(f => group.includes(f))
+    if (anyIn(businessFields)) return 'Business Questions'
+    if (anyIn(resourceFields)) return 'Resource Questions'
+    if (anyIn(specialistFields)) return 'Resource Specialist Questions'
+    return 'Clarification'
+  }
   
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -299,6 +312,11 @@ export default function Chat() {
                 }`}>
                   {msg.type === 'questions' ? (
                     <div className="space-y-3">
+                      <div>
+                        <span className="text-[10px] sm:text-xs font-semibold uppercase tracking-wider bg-indigo-100 text-indigo-800 px-2 py-1 rounded">
+                          {groupLabelFor(msg.questions)}
+                        </span>
+                      </div>
                       <p className="font-semibold mb-3">{msg.text}</p>
                       {msg.questions?.map((q, idx) => (
                         <div key={idx} className="space-y-1">
