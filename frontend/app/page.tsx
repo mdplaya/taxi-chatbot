@@ -4,10 +4,11 @@ import { useState, useEffect, useRef } from 'react'
 
 interface Message {
   id: string
-  type: 'user' | 'bot' | 'questions'
+  type: 'user' | 'bot' | 'questions' | 'divider'
   text?: string
   questions?: Array<{field: string; question: string; description: string}>
   payload?: any
+  label?: string
 }
 
 // Status Badge Component
@@ -47,6 +48,7 @@ export default function Chat() {
   const [progressPercentage, setProgressPercentage] = useState<number>(0)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const eventSourceRef = useRef<EventSource | null>(null)
+  const lastGroupRef = useRef<string | null>(null)
   
   const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
@@ -146,13 +148,19 @@ export default function Chat() {
         
         eventSource.addEventListener('clarification', (event) => {
           const data = JSON.parse(event.data)
+          const group = groupLabelFor(data.questions)
+          const msgs: Message[] = []
+          if (group && lastGroupRef.current !== group) {
+            msgs.push({ id: (Date.now() + 0).toString(), type: 'divider', label: group })
+            lastGroupRef.current = group
+          }
           const botMessage: Message = {
             id: (Date.now() + 1).toString(),
             type: 'questions',
             text: data.response,
             questions: data.questions
           }
-          setMessages(prev => [...prev, botMessage])
+          setMessages(prev => [...prev, ...msgs, botMessage])
           setLoading(false)
           eventSource.close()
         })
@@ -220,6 +228,12 @@ export default function Chat() {
         setSystemMode(data.mode)
       }
       
+      const group = data.needs_clarification ? groupLabelFor(data.questions) : null
+      const msgs: Message[] = []
+      if (group && lastGroupRef.current !== group) {
+        msgs.push({ id: (Date.now() + 0).toString(), type: 'divider', label: group })
+        lastGroupRef.current = group
+      }
       const botMessage: Message = {
         id: (Date.now() + 1).toString(),
         type: data.needs_clarification ? 'questions' : 'bot',
@@ -227,8 +241,8 @@ export default function Chat() {
         questions: data.questions,
         payload: data.final_payload
       }
-      
-      setMessages(prev => [...prev, botMessage])
+
+      setMessages(prev => [...prev, ...msgs, botMessage])
     } catch (error) {
       console.error('Error:', error)
       setMessages(prev => [...prev, {
@@ -263,6 +277,12 @@ export default function Chat() {
         setSystemMode(data.mode)
       }
       
+      const group = data.needs_clarification ? groupLabelFor(data.questions) : null
+      const msgs: Message[] = []
+      if (group && lastGroupRef.current !== group) {
+        msgs.push({ id: (Date.now() + 0).toString(), type: 'divider', label: group })
+        lastGroupRef.current = group
+      }
       const botMessage: Message = {
         id: Date.now().toString(),
         type: data.needs_clarification ? 'questions' : 'bot',
@@ -270,8 +290,8 @@ export default function Chat() {
         questions: data.questions,
         payload: data.final_payload
       }
-      
-      setMessages(prev => [...prev, botMessage])
+
+      setMessages(prev => [...prev, ...msgs, botMessage])
       setAnswers({})
     } catch (error) {
       console.error('Error:', error)
@@ -310,7 +330,13 @@ export default function Chat() {
                     ? 'bg-blue-600 text-white' 
                     : 'bg-gray-100 text-gray-800'
                 }`}>
-                  {msg.type === 'questions' ? (
+                  {msg.type === 'divider' ? (
+                    <div className="text-center">
+                      <span className="text-[10px] sm:text-xs font-semibold uppercase tracking-wider bg-indigo-100 text-indigo-800 px-2 py-1 rounded">
+                        {msg.label}
+                      </span>
+                    </div>
+                  ) : msg.type === 'questions' ? (
                     <div className="space-y-3">
                       <div>
                         <span className="text-[10px] sm:text-xs font-semibold uppercase tracking-wider bg-indigo-100 text-indigo-800 px-2 py-1 rounded">
