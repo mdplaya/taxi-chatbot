@@ -25,6 +25,7 @@ def start_session(client: TestClient) -> str:
         ("os", "bananaOS"),
         ("useType", "unknown-role"),
         ("machineType", "e2-notreal"),
+        ("machineType", "n1-standard-72323"),
     ],
 )
 def test_answer_returns_clarification_on_invalid_fields(field: str, value: str):
@@ -44,4 +45,3 @@ def test_answer_returns_clarification_on_invalid_fields(field: str, value: str):
         (isinstance(q, dict) and field in (q.get("question") or ""))
         for q in questions
     ), f"questions did not include field {field}: {questions}"
-

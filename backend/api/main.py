@@ -710,7 +710,7 @@ async def answer_clarification(request: AnswerRequest, raw_request: Request):
             vm_request_obj,
             sanitize_answers(request.answers)
         )
-    except ValueError as e:
+    except (ValueError, ValidationError) as e:
         # Gracefully handle invalid enum/field values during clarification
         err_msg = str(e)
         logger.error(f"[API] Clarification validation error: {err_msg}")
