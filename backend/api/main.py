@@ -705,10 +705,64 @@ async def answer_clarification(request: AnswerRequest, raw_request: Request):
     
     # Update VM request with sanitized answers
     clarification_agent = ClarificationAgent(context=context)
-    updated_vm_request = await clarification_agent.process_answers(
-        vm_request_obj,
-        sanitize_answers(request.answers)
-    )
+    try:
+        updated_vm_request = await clarification_agent.process_answers(
+            vm_request_obj,
+            sanitize_answers(request.answers)
+        )
+    except ValueError as e:
+        # Gracefully handle invalid enum/field values during clarification
+        err_msg = str(e)
+        logger.error(f"[API] Clarification validation error: {err_msg}")
+        # Attempt to extract field name and value for a targeted question
+        bad_field = None
+        bad_value = None
+        if ":" in err_msg and "Invalid value for" in err_msg:
+            try:
+                # Format: "Invalid value for {field}: {value}"
+                prefix, val = err_msg.split(":", 1)
+                bad_value = val.strip()
+                bad_field = prefix.split("for", 1)[1].strip()
+            except Exception:
+                pass
+
+        # Persist any partial updates that succeeded before the error
+        session.current_vm_request = (
+            vm_request_obj.model_dump() if hasattr(vm_request_obj, 'model_dump')
+            else (vm_request_obj.dict() if hasattr(vm_request_obj, 'dict') else vm_request_obj)
+        )
+        await save_session(session)
+
+        # Ask for the problematic field and any other missing fields
+        clarification_result = await clarification_agent.get_clarifications(
+            vm_request_obj,
+            context
+        )
+
+        questions = clarification_result.get("questions", [])
+        # Ensure the specific invalid field is explicitly requested
+        if bad_field and all(q.get("field") != bad_field for q in questions if isinstance(q, dict)):
+            friendly_examples = {
+                "lineOfBusiness": "RETAIL, ISTS, EDML",
+                "appEnvironment": "NONPROD, PROD",
+                "os": "LINUX_RHEL8, LINUX_RHEL9, WINDOWS_19, WINDOWS_22",
+                "useType": "app, database",
+            }
+            questions.insert(0, {
+                "field": bad_field,
+                "question": f"Please provide a valid {bad_field} (e.g., {friendly_examples.get(bad_field, 'a valid value')}).",
+                "reason": f"Invalid value: {bad_value}"
+            })
+
+        current_mode = llm_manager.get_mode()
+        return ChatResponse(
+            response="I need a bit more information:",
+            needs_clarification=True,
+            questions=questions,
+            session_id=request.session_id,
+            status="gathering_info",
+            mode=current_mode
+        )
     
     # Store updated asked_fields in session metadata
     if hasattr(session, 'metadata'):
