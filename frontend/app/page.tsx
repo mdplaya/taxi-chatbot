@@ -56,13 +56,40 @@ export default function Chat() {
   const businessFields = ['lineOfBusiness', 'id', 'appEnvironment', 'appEnvironmentSubtype', 'costCenter']
   const resourceFields = ['useType', 'os']
   const specialistFields = ['zone', 'machineType']
-  const groupLabelFor = (qs: Array<{field: string}> | undefined): string => {
+
+  type GroupMeta = { key: 'business' | 'resource' | 'specialist' | 'other'; label: string; bg: string; text: string; tooltip: string }
+
+  const groupMetaFor = (qs: Array<{field: string}> | undefined): GroupMeta => {
     const fields = (qs || []).map(q => q.field)
     const anyIn = (group: string[]) => fields.some(f => group.includes(f))
-    if (anyIn(businessFields)) return 'Business Questions'
-    if (anyIn(resourceFields)) return 'Resource Questions'
-    if (anyIn(specialistFields)) return 'Resource Specialist Questions'
-    return 'Clarification'
+    if (anyIn(businessFields)) {
+      return {
+        key: 'business',
+        label: 'Business Questions',
+        bg: 'bg-amber-100',
+        text: 'text-amber-900',
+        tooltip: 'Business context: line of business, requestor email, environment, and cost center.'
+      }
+    }
+    if (anyIn(resourceFields)) {
+      return {
+        key: 'resource',
+        label: 'Resource Questions',
+        bg: 'bg-blue-100',
+        text: 'text-blue-900',
+        tooltip: 'Resource details: how the VM will be used and the operating system.'
+      }
+    }
+    if (anyIn(specialistFields)) {
+      return {
+        key: 'specialist',
+        label: 'Resource Specialist Questions',
+        bg: 'bg-purple-100',
+        text: 'text-purple-900',
+        tooltip: 'Cloud-specific details: target zone and GCP machine type.'
+      }
+    }
+    return { key: 'other', label: 'Clarification', bg: 'bg-gray-100', text: 'text-gray-900', tooltip: 'Additional details to proceed.' }
   }
   
   useEffect(() => {
@@ -148,11 +175,11 @@ export default function Chat() {
         
         eventSource.addEventListener('clarification', (event) => {
           const data = JSON.parse(event.data)
-          const group = groupLabelFor(data.questions)
+          const meta = groupMetaFor(data.questions)
           const msgs: Message[] = []
-          if (group && lastGroupRef.current !== group) {
-            msgs.push({ id: (Date.now() + 0).toString(), type: 'divider', label: group })
-            lastGroupRef.current = group
+          if (meta.label && lastGroupRef.current !== meta.label) {
+            msgs.push({ id: (Date.now() + 0).toString(), type: 'divider', label: meta.label })
+            lastGroupRef.current = meta.label
           }
           const botMessage: Message = {
             id: (Date.now() + 1).toString(),
@@ -228,11 +255,11 @@ export default function Chat() {
         setSystemMode(data.mode)
       }
       
-      const group = data.needs_clarification ? groupLabelFor(data.questions) : null
+      const meta = data.needs_clarification ? groupMetaFor(data.questions) : null
       const msgs: Message[] = []
-      if (group && lastGroupRef.current !== group) {
-        msgs.push({ id: (Date.now() + 0).toString(), type: 'divider', label: group })
-        lastGroupRef.current = group
+      if (meta && meta.label && lastGroupRef.current !== meta.label) {
+        msgs.push({ id: (Date.now() + 0).toString(), type: 'divider', label: meta.label })
+        lastGroupRef.current = meta.label
       }
       const botMessage: Message = {
         id: (Date.now() + 1).toString(),
@@ -277,11 +304,11 @@ export default function Chat() {
         setSystemMode(data.mode)
       }
       
-      const group = data.needs_clarification ? groupLabelFor(data.questions) : null
+      const meta = data.needs_clarification ? groupMetaFor(data.questions) : null
       const msgs: Message[] = []
-      if (group && lastGroupRef.current !== group) {
-        msgs.push({ id: (Date.now() + 0).toString(), type: 'divider', label: group })
-        lastGroupRef.current = group
+      if (meta && meta.label && lastGroupRef.current !== meta.label) {
+        msgs.push({ id: (Date.now() + 0).toString(), type: 'divider', label: meta.label })
+        lastGroupRef.current = meta.label
       }
       const botMessage: Message = {
         id: Date.now().toString(),
@@ -332,17 +359,38 @@ export default function Chat() {
                 }`}>
                   {msg.type === 'divider' ? (
                     <div className="text-center">
-                      <span className="text-[10px] sm:text-xs font-semibold uppercase tracking-wider bg-indigo-100 text-indigo-800 px-2 py-1 rounded">
+                      <span
+                        className={`text-[10px] sm:text-xs font-semibold uppercase tracking-wider px-2 py-1 rounded ${
+                          msg.label?.startsWith('Business') ? 'bg-amber-100 text-amber-900' :
+                          msg.label?.startsWith('Resource Specialist') ? 'bg-purple-100 text-purple-900' :
+                          msg.label?.startsWith('Resource') ? 'bg-blue-100 text-blue-900' : 'bg-gray-100 text-gray-900'
+                        }`}
+                        title={msg.label?.startsWith('Business')
+                          ? 'Business context: line of business, requestor email, environment, and cost center.'
+                          : msg.label?.startsWith('Resource Specialist')
+                          ? 'Cloud-specific details: target zone and GCP machine type.'
+                          : msg.label?.startsWith('Resource')
+                          ? 'Resource details: how the VM will be used and the operating system.'
+                          : 'Additional details to proceed.'}
+                      >
                         {msg.label}
                       </span>
                     </div>
                   ) : msg.type === 'questions' ? (
                     <div className="space-y-3">
-                      <div>
-                        <span className="text-[10px] sm:text-xs font-semibold uppercase tracking-wider bg-indigo-100 text-indigo-800 px-2 py-1 rounded">
-                          {groupLabelFor(msg.questions)}
-                        </span>
-                      </div>
+                      {(() => {
+                        const meta = groupMetaFor(msg.questions)
+                        return (
+                          <div>
+                            <span
+                              className={`text-[10px] sm:text-xs font-semibold uppercase tracking-wider px-2 py-1 rounded ${meta.bg} ${meta.text}`}
+                              title={meta.tooltip}
+                            >
+                              {meta.label}
+                            </span>
+                          </div>
+                        )
+                      })()}
                       <p className="font-semibold mb-3">{msg.text}</p>
                       {msg.questions?.map((q, idx) => (
                         <div key={idx} className="space-y-1">
