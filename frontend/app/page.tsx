@@ -470,17 +470,11 @@ export default function Chat() {
             <div ref={messagesEndRef} />
           </div>
         </div>
-        
-        {sessionId && (
-          <div className="mt-4 text-center text-sm text-gray-600">
-            Session ID: {sessionId}
-          </div>
-        )}
       </div>
       {/* Fixed overlay chatbox independent of inner scroll */}
-      <div className={`fixed left-0 right-0 ${messages.length > 0 ? 'top-[75vh] translate-y-0' : 'top-1/2 -translate-y-1/2'}
+      <div className={`fixed left-0 right-0 ${messages.length > 0 ? 'top-[75vh] translate-y-0 opacity-100' : 'top-1/2 -translate-y-1/2 opacity-90'}
         border-t bg-gradient-to-t from-white/95 to-white/60 backdrop-blur supports-[backdrop-filter]:bg-white/70
-        shadow-[0_-24px_64px_rgba(0,0,0,0.18)] transition-all duration-500 ease-out will-change-[top,transform]`}>
+        shadow-[0_-28px_80px_rgba(0,0,0,0.22)] transition-all duration-1000 ease-out will-change-[top,transform,opacity]`}>
         <div className="max-w-4xl mx-auto px-4 py-4">
           <div className="flex flex-col items-center gap-2">
             <h1 className="text-xl font-semibold">TAXI Infrastructure Bot</h1>
@@ -535,6 +529,9 @@ export default function Chat() {
                 Send
               </button>
             </div>
+            {sessionId && (
+              <div className="text-[11px] text-gray-500">Session ID: {sessionId}</div>
+            )}
           </div>
         </div>
       </div>
