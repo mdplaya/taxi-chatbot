@@ -51,12 +51,11 @@ class SimpleValkeyManager:
             self.connected = False
             self.memory_store = {}  # Fallback to in-memory
     
-    async def store_session(self, session_id: str, data: Dict[str, Any]) -> bool:
-        """Store session data"""
+    async def save_session(self, session_id: str, session_data: Dict[str, Any]) -> bool:
+        """Canonical: save a session."""
         try:
             key = f"session:{session_id}"
-            value = json.dumps(data, default=str)
-            
+            value = json.dumps(session_data, default=str)
             if self.connected:
                 self.client.setex(key, self.ttl, value)
             else:
@@ -65,47 +64,36 @@ class SimpleValkeyManager:
                     "data": value,
                     "expires": datetime.now() + timedelta(seconds=self.ttl)
                 }
-            
-            logger.debug(f"Stored session {session_id}")
+            logger.debug(f"Saved session {session_id}")
             return True
-            
         except Exception as e:
-            logger.error(f"Failed to store session {session_id}: {e}")
+            logger.error(f"Failed to save session {session_id}: {e}")
             return False
-    
-    async def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
-        """Retrieve session data"""
+
+    async def load_session(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Canonical: load a session."""
         try:
             key = f"session:{session_id}"
-            
             if self.connected:
                 value = self.client.get(key)
             else:
-                # In-memory fallback
+                value = None
                 if key in self.memory_store:
                     entry = self.memory_store[key]
                     if entry["expires"] > datetime.now():
                         value = entry["data"]
                     else:
                         del self.memory_store[key]
-                        value = None
-                else:
-                    value = None
-            
-            if value:
-                return json.loads(value)
-            
-            return None
-            
+            return json.loads(value) if value else None
         except Exception as e:
-            logger.error(f"Failed to get session {session_id}: {e}")
+            logger.error(f"Failed to load session {session_id}: {e}")
             return None
-    
+
     async def update_session(self, session_id: str, updates: Dict[str, Any]) -> bool:
         """Update existing session data"""
         try:
             # Get current data
-            current = await self.get_session(session_id)
+            current = await self.load_session(session_id)
             if not current:
                 current = {}
             
@@ -113,7 +101,7 @@ class SimpleValkeyManager:
             current.update(updates)
             
             # Store back
-            return await self.store_session(session_id, current)
+            return await self.save_session(session_id, current)
             
         except Exception as e:
             logger.error(f"Failed to update session {session_id}: {e}")
@@ -236,3 +224,7 @@ def get_valkey_manager() -> SimpleValkeyManager:
     if _valkey_manager is None:
         _valkey_manager = SimpleValkeyManager()
     return _valkey_manager
+
+# Back-compat class name used in tests and docs
+class ValkeyManager(SimpleValkeyManager):
+    pass
