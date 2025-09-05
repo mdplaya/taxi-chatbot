@@ -10,6 +10,7 @@
     "costCenter": "12345",
     "sharedEmailAddress": "TAXIAutomation@CVShealth.com"
   },
+  "cloud": GCP
   "project": "CORP-dev-broc-sechub-vpc",
   "networkProject": "CVS-securehub-prod",
   "network": "VPC-aacvs-hub-trusted-nonprod-1",

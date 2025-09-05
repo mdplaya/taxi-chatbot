@@ -35,13 +35,15 @@ from pathlib import Path
 env_path = Path(__file__).parent.parent / '.env'
 load_dotenv(dotenv_path=env_path)
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s %(levelname)s %(name)s: %(message)s',
-    datefmt='%m-%d-%Y--%H:%M:%S%z'
+# Centralized logging
+from utils.logging_config import (
+    configure_logging,
+    get_logger,
+    set_session_id,
+    reset_session_id,
 )
-logger = logging.getLogger(__name__)
+configure_logging()
+logger = get_logger(__name__)
 
 # Check LLM availability on startup
 current_mode = llm_manager.get_mode()
@@ -298,10 +300,10 @@ async def chat(request: ChatRequest, raw_request: Request):
     """
     Main chat endpoint - processes user messages through agent pipeline
     """
-    logger.info(f"Chat request: {request.message}")
-    
-    # Get or create session
+    # Determine session id first so it's present in all logs
     session_id = request.session_id or generate_session_id()
+    token = set_session_id(session_id)
+    logger.info(f"Chat request: {request.message}")
     
     if session_id not in legacy_sessions:
         legacy_sessions[session_id] = ChatSession(
@@ -556,6 +558,12 @@ async def chat(request: ChatRequest, raw_request: Request):
             status="error",
             mode=llm_manager.get_mode()
         )
+    finally:
+        # Ensure session id context is cleared
+        try:
+            reset_session_id(token)
+        except Exception:
+            pass
 
 @app.post("/answer", response_model=ChatResponse)
 async def answer_clarification(request: AnswerRequest, raw_request: Request):
@@ -563,6 +571,8 @@ async def answer_clarification(request: AnswerRequest, raw_request: Request):
     """
     Handle clarification answers from the user
     """
+    # Set session id for consistent logging
+    set_session_id(request.session_id)
     logger.info(f"Answer request for session {request.session_id}")
     
     # Try to get session from Valkey first

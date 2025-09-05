@@ -14,12 +14,11 @@ import uvicorn
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+from utils.logging_config import configure_logging, get_logger
+
+# Centralized logging
+configure_logging()
+logger = get_logger(__name__)
 
 app = FastAPI(title="TAXI MCP Server")
 
