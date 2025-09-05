@@ -1,7 +1,5 @@
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
-from sse_starlette.sse import EventSourceResponse
 from pydantic import BaseModel, ValidationError
 from typing import Optional, Dict, Any, List, Literal
 import logging
@@ -10,8 +8,6 @@ from datetime import datetime
 import os
 from dotenv import load_dotenv
 import sys
-import asyncio
-import json
 
 # Add backend to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -21,14 +17,13 @@ from agents.orchestrator import OrchestratorAgent
 from agents.clarification import ClarificationAgent
 from agents.compute import ComputeAgent
 from agents.gce_specialist import GCESpecialistAgent
-from models.taxi_models import VMRequest, ChatSession, ProgressStep
+from models.taxi_models import VMRequest, ChatSession
 from models.agent_session import AgentSession, ConversationState
 from utils.llm_manager import llm_manager
 from utils.llm_manager import set_llm_debug
-from utils.fields import CANONICAL_VM_FIELDS, canonical_vm_fields, sanitize_answers
-from utils.progress_manager import progress_manager
-from utils.valkey_manager import valkey_manager
-from utils.learning import LearningEngine
+from utils.fields import CANONICAL_VM_FIELDS, sanitize_answers
+from utils.valkey_manager import get_valkey_manager
+valkey_manager = get_valkey_manager()
 
 # Load environment variables - find .env file in backend directory
 from pathlib import Path
@@ -56,169 +51,107 @@ else:
 # Initialize FastAPI app
 app = FastAPI(title="TAXI Chatbot API")
 
-def infer_field_from_question(question: str) -> str:
-    """Infer a VMRequest field name from a natural-language question string.
-
-    Avoids mapping to meaningless values like "which" by scanning for
-    known keywords and returning canonical field names used by ClarificationAgent
-    and VMRequest.
-    """
-    if not question:
-        return ""
-    q = question.strip().lower()
-
-    # Machine type synonyms
-    if (
-        "machine type" in q
-        or "instance type" in q
-        or "vm size" in q
-        or ("size" in q and ("vm" in q or "instance" in q))
-    ):
-        return "machineType"
-
-    # Zone / Region (we track zone; region is derived)
-    if " zone" in q or q.startswith("zone") or "gcp zone" in q:
-        return "zone"
-    if " region" in q or q.startswith("region") or "gcp region" in q:
-        # We prefer zone in our schema; ask for zone even if question says region
-        return "zone"
-
-    # OS
-    if "operating system" in q or q.startswith("os") or " which os" in q:
-        return "os"
-
-    # Use type
-    if (
-        "use type" in q
-        or "workload type" in q
-        or "app or database" in q
-        or "application or database" in q
-        or ("app" in q and "database" in q)
-    ):
-        return "useType"
-
-    # Project
-    if "project" in q:
-        return "project"
-
-    # Cost center
-    if "cost center" in q.replace("-", " ") or "billing code" in q:
-        return "costCenter"
-
-    # Line of business
-    if "line of business" in q or "lob" in q:
-        return "lineOfBusiness"
-
-    # Requestor email/id
-    if "email" in q or "requestor" in q or "requester" in q or q.strip() == "id":
-        return "id"
-
-    # Environment
-    if "environment" in q:
-        return "appEnvironment"
-    if any(x in q for x in ["dev", "qa", "test", "perf"]):
-        return "appEnvironmentSubtype"
-
-    # Fallback: try to detect any canonical field mention directly
-    canonical = [
-        "machineType", "zone", "project", "lineOfBusiness", "costCenter",
-        "os", "useType", "id", "appEnvironment", "appEnvironmentSubtype"
-    ]
-    for name in canonical:
-        if name.lower() in q:
-            return name
-
-    # Unknown; return empty to avoid bad field like "which"
-    return ""
+# Simple field normalization mapping
+FIELD_NORMALIZATION = {
+    "appEnvironment": {
+        "PROD": "PROD",
+        "PRODUCTION": "PROD",
+        "NONPROD": "NONPROD",
+        "NON-PROD": "NONPROD",
+        "DEV": "NONPROD",
+        "TEST": "NONPROD",
+        "QA": "NONPROD",
+        "DEVELOPMENT": "NONPROD",
+        "TESTING": "NONPROD"
+    },
+    "appEnvironmentSubtype": {
+        "dev": "dev",
+        "development": "dev",
+        "develop": "dev",
+        "qa": "qa",
+        "quality": "qa",
+        "quality-assurance": "qa",
+        "test": "test",
+        "testing": "test",
+        "integration": "test",
+        "perf": "perf",
+        "performance": "perf",
+        "load": "perf"
+    },
+    "os": {
+        "rhel": "LINUX_RHEL9",
+        "red hat": "LINUX_RHEL9",
+        "rhel8": "LINUX_RHEL8",
+        "rhel9": "LINUX_RHEL9",
+        "linux": "LINUX_RHEL9",
+        "windows": "WINDOWS_22",
+        "win": "WINDOWS_22",
+        "windows22": "WINDOWS_22",
+        "windows2022": "WINDOWS_22",
+        "windows19": "WINDOWS_19",
+        "windows2019": "WINDOWS_19"
+    },
+    "useType": {
+        "app": "app",
+        "application": "app",
+        "database": "database",
+        "db": "database"
+    },
+    "lineOfBusiness": {
+        "RETAIL": "RETAIL",
+        "ISTS": "ISTS", 
+        "EDML": "EDML"
+    }
+}
 
 def normalize_vm_field_value(field: str, value: Any) -> Any:
-    """
-    Normalize raw values to proper enum values for VMRequest fields.
-    Handles common variations and ensures Pydantic validation passes.
-    """
+    """Normalize field values using direct lookup"""
     if value is None:
         return None
     
-    # Normalize based on field type
-    if field == "appEnvironment":
-        value_upper = str(value).upper()
-        if value_upper in ["PROD", "PRODUCTION"]:
-            return "PROD"
-        elif value_upper in ["NONPROD", "NON-PROD", "DEV", "TEST", "QA", "DEVELOPMENT", "TESTING"]:
-            return "NONPROD"
-        return value  # Return as-is if not recognized
+    if field in FIELD_NORMALIZATION:
+        value_key = str(value).lower() if field != "lineOfBusiness" else str(value).upper()
+        return FIELD_NORMALIZATION[field].get(value_key, value)
     
-    elif field == "appEnvironmentSubtype":
-        value_lower = str(value).lower()
-        if value_lower in ["dev", "development", "develop"]:
-            return "dev"
-        elif value_lower in ["qa", "quality", "quality-assurance"]:
-            return "qa"
-        elif value_lower in ["test", "testing", "integration"]:
-            return "test"
-        elif value_lower in ["perf", "performance", "load"]:
-            return "perf"
-        return value  # Return as-is if not recognized
-    
-    elif field == "os":
-        value_lower = str(value).lower()
-        # Handle RHEL variations
-        if "rhel" in value_lower or "red hat" in value_lower:
-            if "9" in value_lower:
-                return "LINUX_RHEL9"
-            elif "8" in value_lower:
-                return "LINUX_RHEL8"
-            else:
-                return "LINUX_RHEL9"  # Default to RHEL9
-        # Handle generic Linux
-        elif "linux" in value_lower:
-            return "LINUX_RHEL9"  # Default Linux to RHEL9
-        # Handle Windows variations
-        elif "windows" in value_lower or "win" in value_lower:
-            if "22" in value_lower or "2022" in value_lower:
-                return "WINDOWS_22"
-            elif "19" in value_lower or "2019" in value_lower:
-                return "WINDOWS_19"
-            else:
-                return "WINDOWS_22"  # Default Windows
-        return value  # Return as-is if not recognized
-    
-    elif field == "useType":
-        value_lower = str(value).lower()
-        if "app" in value_lower or "application" in value_lower:
-            return "app"
-        elif "database" in value_lower or "db" in value_lower:
-            return "database"
-        return value  # Return as-is if not recognized
-    
-    elif field == "lineOfBusiness":
-        value_upper = str(value).upper()
-        if "RETAIL" in value_upper:
-            return "RETAIL"
-        elif "ISTS" in value_upper:
-            return "ISTS"
-        elif "EDML" in value_upper:
-            return "EDML"
-        return value  # Return as-is if not recognized
-    
-    elif field == "machineType":
-        # Machine types are already specific strings, just return
-        return str(value)
-    
-    # For other fields (zone, costCenter, project, id), return as-is
     return value
 
-# Configure CORS for web and mobile clients
+def infer_field_from_question(question: str) -> str:
+    """Simple field inference using keyword matching"""
+    if not question:
+        return ""
+    
+    q = question.strip().lower()
+    
+    # Direct field mapping
+    field_keywords = {
+        "machineType": ["machine type", "instance type", "vm size"],
+        "zone": ["zone", "region", "gcp zone", "gcp region"],
+        "os": ["operating system", "os", "which os"],
+        "useType": ["use type", "workload type", "app or database", "application or database"],
+        "project": ["project"],
+        "costCenter": ["cost center", "billing code"],
+        "lineOfBusiness": ["line of business", "lob"],
+        "id": ["email", "requestor", "requester"],
+        "appEnvironment": ["environment"],
+        "appEnvironmentSubtype": ["dev", "qa", "test", "perf"]
+    }
+    
+    for field, keywords in field_keywords.items():
+        if any(keyword in q for keyword in keywords):
+            return field
+    
+    return ""
+
+# Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, specify exact origins
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Session storage now handled by Valkey
-# Legacy in-memory sessions for backward compatibility
+# Session storage
 legacy_sessions: Dict[str, ChatSession] = {}
 
 async def get_session(session_id: str) -> Optional[AgentSession]:
@@ -249,7 +182,7 @@ class ChatResponse(BaseModel):
     session_id: str
     final_payload: Optional[Dict[str, Any]] = None
     status: str
-    mode: Literal["online", "offline"] = "offline"  # Current operation mode
+    mode: Literal["online", "offline"] = "offline"
 
 class AnswerRequest(BaseModel):
     """Clarification answers from client"""
@@ -259,6 +192,15 @@ class AnswerRequest(BaseModel):
 def generate_session_id() -> str:
     """Generate unique session ID"""
     return f"session-{uuid.uuid4().hex[:8]}"
+
+def _set_llm_debug_from_request(request: Request) -> None:
+    """Enable LLM debug logging if debug=true"""
+    try:
+        debug_param = request.query_params.get('debug')
+        enabled = str(debug_param).lower() in {"1", "true", "yes"}
+        set_llm_debug(enabled)
+    except Exception:
+        set_llm_debug(False)
 
 @app.get("/")
 async def root():
@@ -297,10 +239,8 @@ async def status():
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest, raw_request: Request):
     _set_llm_debug_from_request(raw_request)
-    """
-    Main chat endpoint - processes user messages through agent pipeline
-    """
-    # Determine session id first so it's present in all logs
+    """Main chat endpoint - processes user messages through agent pipeline"""
+    
     session_id = request.session_id or generate_session_id()
     token = set_session_id(session_id)
     logger.info(f"Chat request: {request.message}")
@@ -314,22 +254,19 @@ async def chat(request: ChatRequest, raw_request: Request):
         )
     
     session = legacy_sessions[session_id]
-    
-    # Initialize orchestrator
     orchestrator = OrchestratorAgent()
     
     try:
-        # Get current mode
         current_mode = llm_manager.get_mode()
         
-        # Build context (allow provider hint from UI)
+        # Build context
         provider_hint = None
         try:
             provider_hint = (request.context or {}).get('provider') if request.context else None
         except Exception:
             provider_hint = None
         
-        # Process through orchestrator with structured input
+        # Process through orchestrator
         orch_input = {
             "message": request.message,
             "session_id": session_id,
@@ -337,7 +274,6 @@ async def chat(request: ChatRequest, raw_request: Request):
         }
         orchestrator_result = await orchestrator.process(orch_input, session_id)
         
-        # Ensure we have a valid result
         if not isinstance(orchestrator_result, dict):
             logger.error(f"Invalid orchestrator result type: {type(orchestrator_result)}")
             return ChatResponse(
@@ -350,18 +286,16 @@ async def chat(request: ChatRequest, raw_request: Request):
         
         # Handle routing based on next agent
         if orchestrator_result.get("next_agent") == "compute":
-            # Process through compute agent (now just routing)
+            # Process through compute agent
             compute_agent = ComputeAgent()
             compute_result = await compute_agent.process(orchestrator_result["context"])
-            
-            # Compute agent now returns next_agent (specialist)
             specialist_name = compute_result.get("next_agent")
             
             if compute_result.get("next_agent") == "unavailable":
                 specialist_name = compute_result.get("specialist_name", "unknown")
                 cloud_map = {
                     "ec2_specialist": "AWS EC2",
-                    "azure_vm_specialist": "Azure VM",
+                    "azure_vm_specialist": "Azure VM", 
                     "gce_specialist": "GCP GCE"
                 }
                 friendly_name = cloud_map.get(specialist_name, specialist_name)
@@ -373,17 +307,17 @@ async def chat(request: ChatRequest, raw_request: Request):
                     mode=current_mode
                 )
             elif specialist_name == "gce_specialist":
-                # Route to GCE specialist with full context
+                # Route to GCE specialist
                 gce_agent = GCESpecialistAgent()
                 provision_result = await gce_agent.create_instance(
                     compute_result.get("context", orchestrator_result["context"])
                 )
                 
-                # Check if clarification needed from GCE specialist
+                # Check if clarification needed
                 if provision_result.get("needs_clarification"):
                     questions = provision_result.get("questions", [])
                     
-                    # Store partial data in session if available
+                    # Store partial data in session
                     if provision_result.get("partial_data"):
                         partial_data = provision_result["partial_data"]
                         for key, value in partial_data.items():
@@ -397,7 +331,7 @@ async def chat(request: ChatRequest, raw_request: Request):
                     session.status = "gathering_info"
                     legacy_sessions[session_id] = session
                     
-                    # Format questions for client with canonical field inference
+                    # Format questions for client
                     formatted_questions = []
                     for q in questions[:3]:  # Ask up to 3 questions at a time
                         if isinstance(q, str):
@@ -457,7 +391,6 @@ async def chat(request: ChatRequest, raw_request: Request):
                 else:
                     # Handle provisioning error
                     if provision_result.get("needs_clarification"):
-                        # Get asked_fields from session metadata if available
                         asked_fields = session.metadata.get('asked_fields', []) if hasattr(session, 'metadata') else []
                         context = {
                             'raw_request': request.message,
@@ -489,7 +422,6 @@ async def chat(request: ChatRequest, raw_request: Request):
                     )
             
             elif specialist_name == "clarification":
-                # Need more info to determine specialist
                 return ChatResponse(
                     response="I need more information about your compute request. Are you looking to create a VM in GCP, AWS, or Azure?",
                     needs_clarification=False,
@@ -499,7 +431,6 @@ async def chat(request: ChatRequest, raw_request: Request):
                 )
             
             else:
-                # Other specialists not implemented yet
                 return ChatResponse(
                     response=f"The {specialist_name} specialist is not yet implemented. Currently, I can only help with GCP VMs.",
                     needs_clarification=False,
@@ -509,7 +440,7 @@ async def chat(request: ChatRequest, raw_request: Request):
                 )
         
         elif orchestrator_result["next_agent"] == "clarification":
-            # Respect orchestrator: ask Business questions first via Clarification agent
+            # Ask Business questions via Clarification agent
             asked_fields = session.metadata.get('asked_fields', []) if hasattr(session, 'metadata') else []
             context = {
                 'raw_request': request.message,
@@ -538,7 +469,6 @@ async def chat(request: ChatRequest, raw_request: Request):
             )
         
         else:
-            # Other agents not implemented yet
             return ChatResponse(
                 response=f"The {orchestrator_result['next_agent']} agent is not yet implemented. Currently, I can only help with creating VMs in GCP.",
                 needs_clarification=False,
@@ -559,7 +489,6 @@ async def chat(request: ChatRequest, raw_request: Request):
             mode=llm_manager.get_mode()
         )
     finally:
-        # Ensure session id context is cleared
         try:
             reset_session_id(token)
         except Exception:
@@ -568,10 +497,8 @@ async def chat(request: ChatRequest, raw_request: Request):
 @app.post("/answer", response_model=ChatResponse)
 async def answer_clarification(request: AnswerRequest, raw_request: Request):
     _set_llm_debug_from_request(raw_request)
-    """
-    Handle clarification answers from the user
-    """
-    # Set session id for consistent logging
+    """Handle clarification answers from the user"""
+    
     set_session_id(request.session_id)
     logger.info(f"Answer request for session {request.session_id}")
     
@@ -587,7 +514,7 @@ async def answer_clarification(request: AnswerRequest, raw_request: Request):
         legacy_session = legacy_sessions[request.session_id]
         session = AgentSession(
             session_id=request.session_id,
-            state=ConversationState.GATHERING_INFO,  # Use GATHERING_INFO instead of CLARIFYING
+            state=ConversationState.GATHERING_INFO,
             current_vm_request=(
                 legacy_session.vm_request.model_dump() if hasattr(legacy_session.vm_request, 'model_dump')
                 else (legacy_session.vm_request.dict() if hasattr(legacy_session.vm_request, 'dict') else legacy_session.vm_request)
@@ -595,7 +522,7 @@ async def answer_clarification(request: AnswerRequest, raw_request: Request):
             conversation_history=[]
         )
     
-    # Get the current VM request (handle both field names for compatibility)
+    # Get the current VM request
     current_vm = session.current_vm_request or getattr(session, 'vm_request', None)
     if not current_vm:
         raise HTTPException(status_code=400, detail="No VM request found in session")
@@ -609,7 +536,6 @@ async def answer_clarification(request: AnswerRequest, raw_request: Request):
         try:
             vm_request_obj = VMRequest(**normalized_vm)
         except ValidationError as e:
-            # If the error is specifically for 'id' (email), drop it and continue
             errs = getattr(e, 'errors', lambda: [])()
             id_error = False
             for err in errs:
@@ -641,21 +567,10 @@ async def answer_clarification(request: AnswerRequest, raw_request: Request):
             sanitize_answers(request.answers)
         )
     except (ValueError, ValidationError) as e:
-        # Gracefully handle invalid enum/field values during clarification
+        # Handle invalid enum/field values during clarification
         err_msg = str(e)
         logger.error(f"[API] Clarification validation error: {err_msg}")
-        # Attempt to extract field name and value for a targeted question
-        bad_field = None
-        bad_value = None
-        if ":" in err_msg and "Invalid value for" in err_msg:
-            try:
-                # Format: "Invalid value for {field}: {value}"
-                prefix, val = err_msg.split(":", 1)
-                bad_value = val.strip()
-                bad_field = prefix.split("for", 1)[1].strip()
-            except Exception:
-                pass
-
+        
         # Persist any partial updates that succeeded before the error
         session.current_vm_request = (
             vm_request_obj.model_dump() if hasattr(vm_request_obj, 'model_dump')
@@ -669,26 +584,11 @@ async def answer_clarification(request: AnswerRequest, raw_request: Request):
             context
         )
 
-        questions = clarification_result.get("questions", [])
-        # Ensure the specific invalid field is explicitly requested
-        if bad_field and all(q.get("field") != bad_field for q in questions if isinstance(q, dict)):
-            friendly_examples = {
-                "lineOfBusiness": "RETAIL, ISTS, EDML",
-                "appEnvironment": "NONPROD, PROD",
-                "os": "LINUX_RHEL8, LINUX_RHEL9, WINDOWS_19, WINDOWS_22",
-                "useType": "app, database",
-            }
-            questions.insert(0, {
-                "field": bad_field,
-                "question": f"Please provide a valid {bad_field} (e.g., {friendly_examples.get(bad_field, 'a valid value')}).",
-                "reason": f"Invalid value: {bad_value}"
-            })
-
         current_mode = llm_manager.get_mode()
         return ChatResponse(
             response="I need a bit more information:",
             needs_clarification=True,
-            questions=questions,
+            questions=clarification_result.get("questions", []),
             session_id=request.session_id,
             status="gathering_info",
             mode=current_mode
@@ -711,20 +611,17 @@ async def answer_clarification(request: AnswerRequest, raw_request: Request):
     if request.session_id in legacy_sessions:
         legacy_sessions[request.session_id].vm_request = updated_vm_request
     
-    # Get current mode
     current_mode = llm_manager.get_mode()
     
     # Check if we have all required fields now
-    # Pass the context with asked_fields to clarification agent
     clarification_result = await clarification_agent.get_clarifications(
         updated_vm_request,
-        context  # Use the context that already has asked_fields
+        context
     )
     
     if clarification_result["complete"]:
-        # Ready to provision - create context for GCE specialist
+        # Ready to provision
         gce_agent = GCESpecialistAgent()
-        # Build context from session and VM request
         context = {
             "raw_request": session.conversation_history[0].content if session.conversation_history else "",
             "session_id": request.session_id,
@@ -739,7 +636,7 @@ async def answer_clarification(request: AnswerRequest, raw_request: Request):
             # Update AgentSession state
             session.state = ConversationState.PROCESSING
             
-            # Store provision details in user preferences or metadata
+            # Store provision details
             if not session.user_preferences:
                 session.user_preferences = {}
             session.user_preferences["last_provision"] = {
@@ -751,7 +648,7 @@ async def answer_clarification(request: AnswerRequest, raw_request: Request):
             # Save session to Valkey
             await save_session(session)
             
-            # Also update legacy_sessions for backward compatibility
+            # Update legacy_sessions for backward compatibility
             if request.session_id in legacy_sessions:
                 legacy_sessions[request.session_id].status = "provisioning"
                 legacy_sessions[request.session_id].taxi_payload = provision_result.get("payload_sent")
@@ -788,9 +685,7 @@ async def answer_clarification(request: AnswerRequest, raw_request: Request):
 
 @app.get("/session/{session_id}/status")
 async def get_session_status(session_id: str):
-    """
-    Get status of a provisioning session
-    """
+    """Get status of a provisioning session"""
     if session_id not in legacy_sessions:
         raise HTTPException(status_code=404, detail="Session not found")
     
@@ -809,9 +704,7 @@ async def get_session_status(session_id: str):
 
 @app.get("/sessions")
 async def list_sessions():
-    """
-    List all active sessions (for debugging)
-    """
+    """List all active sessions (for debugging)"""
     return {
         "count": len(legacy_sessions),
         "sessions": [
@@ -824,627 +717,11 @@ async def list_sessions():
         ]
     }
 
-@app.get("/chat/stream")
-async def chat_stream(request: Request, message: str, session_id: Optional[str] = None, provider: Optional[str] = None):
-    """
-    SSE endpoint for streaming chat with real-time progress updates
-    """
-    logger.info(f"SSE chat request: {message}")
-    
-    # Get or create session
-    if not session_id:
-        session_id = generate_session_id()
-    
-    if session_id not in legacy_sessions:
-        legacy_sessions[session_id] = ChatSession(
-            session_id=session_id,
-            created_at=datetime.now(),
-            vm_request=VMRequest(),
-            status="gathering_info"
-        )
-    
-    session = legacy_sessions[session_id]
-    
-    async def event_generator():
-        """Generate SSE events for the chat stream"""
-        try:
-            # Send initial connection event
-            yield {
-                "event": "connected",
-                "data": json.dumps({
-                    "session_id": session_id,
-                    "mode": llm_manager.get_mode()
-                })
-            }
-            
-            # Create progress callback for agents
-            async def progress_callback(agent: str, step: str, message: str, percentage: Optional[int]):
-                # Add to session progress
-                session.add_progress(agent, step, message, "in_progress", percentage)
-                # Add to progress manager
-                await progress_manager.add_progress(
-                    session_id, agent, step, message, percentage, "in_progress"
-                )
-            
-            # Initialize orchestrator with progress callback
-            orchestrator = OrchestratorAgent()
-            
-            # Process message with progress updates
-            await progress_manager.add_progress(
-                session_id, "Orchestrator", "analyzing", 
-                "Analyzing your request...", 10, "started"
-            )
-            
-            orch_input = {"message": message, "session_id": session_id, "provider": provider}
-            orchestrator_result = await orchestrator.process(orch_input, session_id)
-            
-            # Handle response based on next agent
-            if orchestrator_result["next_agent"] == "compute":
-                await progress_manager.add_progress(
-                    session_id, "Compute", "routing", 
-                    "Routing to appropriate specialist...", 30, "in_progress"
-                )
-                
-                # Process through compute agent (now just routing)
-                compute_agent = ComputeAgent()
-                compute_result = await compute_agent.process(orchestrator_result["context"])
-                
-                # Compute agent now returns next_agent (specialist)
-                specialist_name = compute_result.get("next_agent")
-                
-                if compute_result.get("next_agent") == "unavailable":
-                    specialist_name = compute_result.get("specialist_name", "unknown")
-                    cloud_map = {
-                        "ec2_specialist": "AWS EC2",
-                        "azure_vm_specialist": "Azure VM",
-                        "gce_specialist": "GCP GCE"
-                    }
-                    friendly_name = cloud_map.get(specialist_name, specialist_name)
-                    yield {
-                        "event": "error",
-                        "data": json.dumps({
-                            "response": f"The {friendly_name} specialist is not yet implemented. Currently, I can only help with GCP VMs.",
-                            "needs_clarification": False,
-                            "session_id": session_id,
-                            "status": "unavailable"
-                        })
-                    }
-                elif specialist_name == "gce_specialist":
-                    await progress_manager.add_progress(
-                        session_id, "GCE Specialist", "analyzing", 
-                        "Analyzing GCP VM requirements...", 50, "in_progress"
-                    )
-                    
-                    # Route to GCE specialist with full context
-                    gce_agent = GCESpecialistAgent()
-                    context_to_pass = compute_result.get("context", orchestrator_result["context"])
-                    logger.info(f"[Streaming] Passing context to GCE specialist: {context_to_pass}")
-                    provision_result = await gce_agent.create_instance(context_to_pass)
-                    logger.info(f"[Streaming] GCE specialist returned: {type(provision_result)}: {provision_result}")
-                    
-                    # Handle error if provision_result is not a dict
-                    if not isinstance(provision_result, dict):
-                        logger.error(f"Invalid provision_result type: {type(provision_result)}: {provision_result}")
-                        provision_result = {
-                            "needs_clarification": False, 
-                            "success": False,
-                            "message": "Error processing request"
-                        }
-                    
-                    # Check if clarification needed from GCE specialist
-                    if provision_result.get("needs_clarification"):
-                        questions = provision_result.get("questions", [])
-                        
-                        # Store partial data in session if available
-                        if provision_result.get("partial_data"):
-                            partial_data = provision_result["partial_data"]
-                            for key, value in partial_data.items():
-                                if value is not None and hasattr(session.vm_request, key):
-                                    normalized_value = normalize_vm_field_value(key, value)
-                                    try:
-                                        setattr(session.vm_request, key, normalized_value)
-                                    except (ValueError, ValidationError):
-                                        logger.warning(f"[API] Ignoring invalid value for {key}: {normalized_value}")
-                        
-                        session.status = "gathering_info"
-                        legacy_sessions[session_id] = session
-                        
-                        # Format questions for client (handle both string and dict formats) with canonical field inference
-                        formatted_questions = []
-                        for q in questions:
-                            if isinstance(q, str):
-                                # Infer canonical field (avoid mapping to 'which')
-                                inferred_field = infer_field_from_question(q)
-                                field = inferred_field or ("machineType" if (q and "machine" in q.lower()) else "")
-                                formatted_questions.append({
-                                    "field": field if field else "please",
-                                    "question": str(q),  # Ensure it's a string
-                                    "description": ""
-                                })
-                            elif isinstance(q, dict):
-                                # Dictionary question (from Clarification Agent)
-                                question_text = q.get("question", "Please provide this information.")
-                                fld = str(q.get("field", "") or "").strip()
-                                if fld not in CANONICAL_VM_FIELDS:
-                                    inferred = infer_field_from_question(question_text)
-                                    if not inferred and "machine" in question_text.lower():
-                                        inferred = "machineType"
-                                    fld = inferred or (fld if fld else "")
-                                formatted_questions.append({
-                                    "field": fld if fld else "please",
-                                    "question": question_text,
-                                    "description": q.get("description", "")
-                                })
-                            # Skip any other types (None, etc.)
-                        
-                        # Send clarification response
-                        yield {
-                            "event": "clarification", 
-                            "data": json.dumps({
-                                "response": f"I need some additional information to create your VM:\n\n*{provision_result.get('message', '')}*",
-                                "needs_clarification": True,
-                                "questions": formatted_questions,
-                                "session_id": session_id,
-                                "status": "gathering_info"
-                            })
-                        }
-                    else:
-                        # Ready to provision
-                        await progress_manager.add_progress(
-                            session_id, "GCE Specialist", "provisioning", 
-                            "Preparing TAXI payload for VM provisioning...", 80, "in_progress"
-                        )
-                        
-                        session.taxi_payload = provision_result.get("payload")
-                        session.taxi_response = provision_result.get("response")
-                        session.status = "complete" if provision_result.get("success") else "failed"
-                        
-                        await progress_manager.add_progress(
-                            session_id, "GCE Specialist", "complete", 
-                            "VM provisioning request completed", 100, "completed"
-                        )
-                        
-                        # Send final response
-                        yield {
-                            "event": "complete",
-                            "data": json.dumps({
-                                "response": provision_result.get("message", "VM provisioning completed"),
-                                "needs_clarification": False,
-                                "session_id": session_id,
-                                "final_payload": session.taxi_payload,
-                                "status": session.status
-                        })
-                    }
-            
-            else:
-                # Other flows not fully implemented
-                yield {
-                    "event": "message",
-                    "data": json.dumps({
-                        "response": f"Processing with {orchestrator_result['next_agent']} agent...",
-                        "session_id": session_id
-                    })
-                }
-                
-        except Exception as e:
-            logger.error(f"Error in SSE stream: {e}")
-            yield {
-                "event": "error",
-                "data": json.dumps({
-                    "error": str(e),
-                    "session_id": session_id
-                })
-            }
-    
-    return EventSourceResponse(event_generator())
-
-@app.get("/session/{session_id}/progress")
-async def get_session_progress(
-    session_id: str,
-    limit: int = 10,
-    since_timestamp: Optional[str] = None
-):
-    """
-    Get recent progress events for a session (polling fallback)
-    """
-    if session_id not in legacy_sessions:
-        raise HTTPException(status_code=404, detail="Session not found")
-    
-    since_dt = None
-    if since_timestamp:
-        try:
-            since_dt = datetime.fromisoformat(since_timestamp)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid timestamp format")
-    
-    # Get progress from manager
-    events = progress_manager.get_recent_progress(session_id, limit, since_dt)
-    summary = progress_manager.get_session_progress_summary(session_id)
-    
-    return {
-        "session_id": session_id,
-        "summary": summary,
-        "events": events
-    }
-
-@app.get("/session/{session_id}/progress/stream")
-async def stream_session_progress(session_id: str):
-    """
-    SSE endpoint for streaming progress updates only
-    """
-    if session_id not in legacy_sessions:
-        raise HTTPException(status_code=404, detail="Session not found")
-    
-    async def progress_stream():
-        """Generate SSE stream from progress manager"""
-        async for event in progress_manager.create_sse_stream(session_id):
-            yield event
-    
-    return EventSourceResponse(progress_stream())
-
-# New Conversational Endpoints
-
-class CorrectionRequest(BaseModel):
-    """Request for field correction"""
-    session_id: str
-    field: str
-    old_value: Any
-    new_value: Any
-
-class ConfirmRequest(BaseModel):
-    """Request for confirmation before action"""
-    session_id: str
-    action: str
-    payload: Dict[str, Any]
-
-class FeedbackRequest(BaseModel):
-    """User feedback for learning"""
-    session_id: str
-    feedback_type: str  # 'positive', 'negative', 'correction'
-    details: Dict[str, Any]
-
-@app.post("/correct")
-async def correct_field(request: CorrectionRequest, raw_request: Request):
-    _set_llm_debug_from_request(raw_request)
-    """Handle inline field corrections"""
-    try:
-        # Load session from Valkey
-        session = await get_session(request.session_id)
-        if not session:
-            raise HTTPException(status_code=404, detail="Session not found")
-        
-        # Track correction
-        session.add_correction(
-            field=request.field,
-            old_value=request.old_value,
-            new_value=request.new_value,
-            corrected_by="user"
-        )
-        
-        # Update VM request if applicable
-        if session.current_vm_request and request.field in session.current_vm_request:
-            session.current_vm_request[request.field] = request.new_value
-        
-        # Save session
-        await save_session(session)
-        
-        # Let agents learn from this correction
-        if session.current_agent:
-            # This would trigger the agent's learn_from_correction method
-            logger.info(f"Agent {session.current_agent} learning from correction: {request.field}")
-        
-        return {
-            "success": True,
-            "message": f"Field '{request.field}' corrected successfully",
-            "session_id": request.session_id
-        }
-        
-    except Exception as e:
-        logger.error(f"Error handling correction: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/confirm")
-async def confirm_submission(request: ConfirmRequest, raw_request: Request):
-    _set_llm_debug_from_request(raw_request)
-    """Confirm before final submission"""
-    try:
-        # Load session from Valkey
-        session = await get_session(request.session_id)
-        if not session:
-            raise HTTPException(status_code=404, detail="Session not found")
-        
-        # Update state to confirming
-        session.update_state(ConversationState.CONFIRMING)
-        session.add_message(
-            role="user",
-            content=f"Confirmed action: {request.action}",
-            metadata={"payload": request.payload}
-        )
-        
-        # Save session
-        await save_session(session)
-        
-        # Process the confirmed action
-        if request.action == "provision_vm":
-            session.update_state(ConversationState.PROCESSING)
-            await save_session(session)
-            
-            # Trigger provisioning with the confirmed payload
-            gce_agent = GCESpecialistAgent()
-            vm_request = VMRequest(**request.payload)
-            # Create context for new GCE specialist signature
-            context = {
-                "raw_request": f"Provision VM with confirmed payload",
-                "session_id": request.session_id,
-                "vm_request": vm_request.model_dump() if hasattr(vm_request, 'model_dump') else (
-                    vm_request.dict() if hasattr(vm_request, 'dict') else vm_request
-                )
-            }
-            provision_result = await gce_agent.create_instance(context)
-            
-            session.final_payload = request.payload
-            session.provision_result = provision_result
-            session.update_state(
-                ConversationState.COMPLETED if provision_result["success"] 
-                else ConversationState.ERROR
-            )
-            await save_session(session)
-            
-            return {
-                "success": provision_result["success"],
-                "message": provision_result.get("message", "Action completed"),
-                "result": provision_result,
-                "session_id": request.session_id
-            }
-        
-        return {
-            "success": True,
-            "message": f"Action '{request.action}' confirmed",
-            "session_id": request.session_id
-        }
-        
-    except Exception as e:
-        logger.error(f"Error handling confirmation: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/learn")
-async def learn_from_feedback(request: FeedbackRequest, raw_request: Request):
-    _set_llm_debug_from_request(raw_request)
-    """Learn from user feedback"""
-    try:
-        # Load session from Valkey
-        session = await get_session(request.session_id)
-        if not session:
-            raise HTTPException(status_code=404, detail="Session not found")
-        
-        # Store feedback in session
-        session.metadata["feedback"] = session.metadata.get("feedback", [])
-        session.metadata["feedback"].append({
-            "type": request.feedback_type,
-            "details": request.details,
-            "timestamp": datetime.now().isoformat()
-        })
-        
-        # If positive feedback, save patterns for future use
-        if request.feedback_type == "positive" and session.current_agent:
-            # Save successful patterns to Valkey for cross-session learning
-            await valkey_manager.save_learned_pattern(
-                agent_name=session.current_agent,
-                pattern_type="successful_interaction",
-                pattern_data={
-                    "context": session.get_recent_context(5),
-                    "outcome": request.details
-                },
-                confidence=0.9
-            )
-        
-        # Save session
-        await save_session(session)
-        
-        return {
-            "success": True,
-            "message": "Thank you for your feedback. I'll use this to improve!",
-            "session_id": request.session_id
-        }
-        
-    except Exception as e:
-        logger.error(f"Error handling feedback: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/stream/{session_id}")
-async def stream_progress(session_id: str):
-    """Stream real-time progress updates via SSE"""
-    async def event_generator():
-        while True:
-            try:
-                # Get session from Valkey
-                session = await get_session(session_id)
-                if session:
-                    yield {
-                        "data": json.dumps({
-                            "state": session.state,
-                            "current_agent": session.current_agent,
-                            "progress": f"Processing with {session.current_agent or 'system'}..."
-                        })
-                    }
-                await asyncio.sleep(1)
-            except Exception as e:
-                logger.error(f"Error in SSE stream: {e}")
-                break
-    
-    return EventSourceResponse(event_generator())
-
-@app.get("/patterns/{session_id}")
-async def get_learned_patterns(session_id: str):
-    """
-    Retrieve learned patterns for a session
-    """
-    try:
-        # Get session from Valkey
-        session = await get_session(session_id)
-        if not session:
-            raise HTTPException(status_code=404, detail="Session not found")
-        
-        # Initialize learning engine
-        learning_engine = LearningEngine(valkey_manager)
-        
-        # Get patterns for each agent involved in session
-        patterns_by_agent = {}
-        for agent_name in ["orchestrator", "clarification", "compute", "gce_specialist"]:
-            patterns = await valkey_manager.get_learned_patterns(
-                agent_name=agent_name,
-                pattern_type="all",
-                min_confidence=0.6
-            )
-            if patterns:
-                patterns_by_agent[agent_name] = patterns
-        
-        # Get session-specific patterns from history
-        session_patterns = []
-        if session.conversation_history:
-            session_patterns = await learning_engine.identify_success_patterns(
-                session.conversation_history,
-                "in_progress"  # Current session outcome
-            )
-        
-        return {
-            "session_id": session_id,
-            "agent_patterns": patterns_by_agent,
-            "session_patterns": [p.model_dump() if hasattr(p, 'model_dump') else (p.dict() if hasattr(p, 'dict') else p) for p in session_patterns],
-            "pattern_count": sum(len(p) for p in patterns_by_agent.values()) + len(session_patterns)
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error retrieving patterns: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/preferences/{user_id}")
-async def get_user_preferences(user_id: str):
-    """
-    Retrieve learned user preferences
-    """
-    try:
-        # Initialize learning engine
-        learning_engine = LearningEngine(valkey_manager)
-        
-        # Load user preferences from Valkey
-        pref_data = await valkey_manager.load_agent_memory(
-            agent_name=f"user_{user_id}",
-            session_id="preferences",
-            memory_type="preferences"
-        )
-        
-        if not pref_data:
-            # No stored preferences, return defaults
-            return {
-                "user_id": user_id,
-                "preferences": {},
-                "confidence_scores": {},
-                "message": "No learned preferences yet"
-            }
-        
-        return {
-            "user_id": user_id,
-            "preferences": pref_data.get("custom_preferences", {}),
-            "cloud_provider": pref_data.get("cloud_provider"),
-            "machine_types": pref_data.get("machine_types", []),
-            "operating_system": pref_data.get("operating_system"),
-            "regions": pref_data.get("regions", []),
-            "communication_style": pref_data.get("communication_style"),
-            "confidence_scores": pref_data.get("confidence_scores", {}),
-            "last_updated": pref_data.get("last_updated")
-        }
-        
-    except Exception as e:
-        logger.error(f"Error retrieving preferences: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/preferences/{user_id}/update")
-async def update_user_preferences(user_id: str, preferences: Dict[str, Any]):
-    """
-    Update user preferences manually
-    """
-    try:
-        # Initialize learning engine
-        learning_engine = LearningEngine(valkey_manager)
-        
-        # Load existing preferences
-        existing = await valkey_manager.load_agent_memory(
-            agent_name=f"user_{user_id}",
-            session_id="preferences",
-            memory_type="preferences"
-        ) or {}
-        
-        # Merge with new preferences
-        existing.update(preferences)
-        existing["last_updated"] = datetime.now().isoformat()
-        
-        # Save updated preferences
-        success = await valkey_manager.save_agent_memory(
-            agent_name=f"user_{user_id}",
-            session_id="preferences",
-            memory_type="preferences",
-            data=existing,
-            ttl=604800  # 7 days
-        )
-        
-        if success:
-            return {
-                "success": True,
-                "message": "Preferences updated successfully",
-                "preferences": existing
-            }
-        else:
-            raise HTTPException(status_code=500, detail="Failed to save preferences")
-            
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error updating preferences: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/suggest-improvements/{agent_name}")
-async def get_improvement_suggestions(agent_name: str):
-    """
-    Get improvement suggestions for a specific agent
-    """
-    try:
-        # Initialize learning engine
-        learning_engine = LearningEngine(valkey_manager)
-        
-        # Get recent performance data for the agent
-        # This is simplified - in production, you'd track actual performance metrics
-        recent_performance = [
-            {"action": "route", "success": True, "latency": 1.2},
-            {"action": "extract", "success": True, "latency": 0.8},
-            {"action": "validate", "success": False, "error": "missing field"},
-        ]
-        
-        # Get improvement suggestions
-        suggestions = await learning_engine.suggest_improvements(
-            agent_name,
-            recent_performance
-        )
-        
-        return {
-            "agent": agent_name,
-            "suggestions": [s.model_dump() if hasattr(s, 'model_dump') else (s.dict() if hasattr(s, 'dict') else s) for s in suggestions],
-            "suggestion_count": len(suggestions),
-            "generated_at": datetime.now().isoformat()
-        }
-        
-    except Exception as e:
-        logger.error(f"Error getting improvement suggestions: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-# Start progress manager cleanup task on startup
+# Startup and shutdown events
 @app.on_event("startup")
 async def startup_event():
     """Initialize background tasks"""
-    await progress_manager.start_cleanup_task()
-    logger.info("Progress manager cleanup task started")
+    logger.info("TAXI Chatbot API starting up")
     
     # Test Valkey connection
     valkey_healthy = await valkey_manager.health_check()
@@ -1456,17 +733,8 @@ async def startup_event():
 @app.on_event("shutdown")
 async def shutdown_event():
     """Cleanup on shutdown"""
-    progress_manager.stop_cleanup_task()
-    logger.info("Progress manager cleanup task stopped")
+    logger.info("TAXI Chatbot API shutting down")
 
 if __name__ == "__main__":
     import uvicorn as uv
     uv.run(app, host="0.0.0.0", port=8000, reload=True)
-def _set_llm_debug_from_request(request: Request) -> None:
-    """Enable LLM debug logging for this request if debug=true is present."""
-    try:
-        debug_param = request.query_params.get('debug')
-        enabled = str(debug_param).lower() in {"1", "true", "yes"}
-        set_llm_debug(enabled)
-    except Exception:
-        set_llm_debug(False)
