@@ -172,8 +172,10 @@ export default function Chat() {
     // If there's a pending question, treat this send as an answer
     const pending = getPendingQuestion()
     if (pending) {
-      setAnswers({ [pending.field]: currentInput })
-      await submitAnswers()
+      // Submit the answer payload directly to avoid stale state reads
+      const payload: Record<string, string> = { [pending.field]: currentInput }
+      setAnswers(payload)
+      await submitAnswers(payload)
       return
     }
     
@@ -338,7 +340,7 @@ export default function Chat() {
     }
   }
   
-  const submitAnswers = async () => {
+  const submitAnswers = async (payload?: Record<string, string>) => {
     setLoading(true)
     
     try {
@@ -347,7 +349,8 @@ export default function Chat() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           session_id: sessionId,
-          answers: answers
+          // Prefer the provided payload to avoid race with React state updates
+          answers: payload ?? answers
         })
       })
       
