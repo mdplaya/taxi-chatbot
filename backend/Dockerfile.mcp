@@ -7,5 +7,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY mcp_server/ ./mcp_server/
 COPY models/ ./models/
+COPY utils/ ./utils/
+
+ENV PYTHONPATH=/app
 
 CMD ["python", "mcp_server/server.py"]
