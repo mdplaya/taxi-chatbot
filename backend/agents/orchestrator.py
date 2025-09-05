@@ -181,19 +181,6 @@ class OrchestratorAgent(BaseAgent):
         """
         logger.info(f"[Orchestrator] Using direct LLM reasoning for routing")
         
-        # Check for clarification needs first
-        from api.main import _check_clarification_needed
-        needs_clarification = await _check_clarification_needed(user_input, session_id)
-        
-        if needs_clarification:
-            logger.info("[Orchestrator] Missing business fields detected, routing to clarification")
-            return self._build_routing_response(
-                "clarification",
-                {"original_request": user_input},
-                "Missing required business information",
-                0.95
-            )
-        
         prompt = f"""
         Analyze this request and determine routing:
         "{user_input}"
@@ -388,9 +375,9 @@ class OrchestratorAgent(BaseAgent):
         history = []
         session_key_prefix = f"session_{session_id}_"
         
-        for key in self.memory.short_term.keys():
+        for key in self.memory.long_term.keys():
             if key.startswith(session_key_prefix):
-                history.append(self.memory.short_term[key])
+                history.append(self.memory.long_term[key])
         
         # Sort by timestamp and return last 5
         history.sort(key=lambda x: x.get('timestamp', 0))
@@ -402,14 +389,14 @@ class OrchestratorAgent(BaseAgent):
             return {}
         
         session_key = f"session_{session_id}_memory"
-        if session_key not in self.memory.short_term:
-            self.memory.short_term[session_key] = {
+        if session_key not in self.memory.long_term:
+            self.memory.long_term[session_key] = {
                 'session_id': session_id,
                 'created_at': datetime.now().isoformat(),
                 'interactions': []
             }
         
-        return self.memory.short_term[session_key]
+        return self.memory.long_term[session_key]
     
     async def update_session(self, session_id: str, context: Dict[str, Any]):
         """Update session with new interaction"""

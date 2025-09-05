@@ -15,6 +15,16 @@ import os
 logger = logging.getLogger(__name__)
 
 
+class SimpleMemory:
+    """Simple memory storage for agents"""
+    def __init__(self):
+        self.short_term = []  # List for sequential storage
+        self.long_term = {}   # Dict for key-value storage
+        self.corrections = []  # List of corrections
+        self.learned_patterns = []  # List of learned patterns
+        self.user_preferences = {}  # Dict of preferences
+
+
 class Action(BaseModel):
     """Simple action representation"""
     name: str
@@ -37,11 +47,7 @@ class SimpleBaseAgent(ABC):
         self.config = {}
         
         # Simple memory storage
-        self.memory = {
-            "short_term": {},
-            "long_term": {},
-            "session_data": {}
-        }
+        self.memory = SimpleMemory()
         
         # Progress tracking
         self.progress_callback: Optional[Callable] = None
@@ -112,7 +118,7 @@ class SimpleBaseAgent(ABC):
                 messages=messages,
                 temperature=1.0,  # Required for gpt-5-mini
                 response_format={"type": "json_object"},
-                max_tokens=self.config.get('max_tokens', 2000),
+                max_completion_tokens=self.config.get('max_tokens', 2000),  # gpt-5-mini uses max_completion_tokens
                 timeout=self.config.get('timeout', 30)
             )
             

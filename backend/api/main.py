@@ -285,13 +285,13 @@ async def chat(request: ChatRequest, raw_request: Request):
             )
         
         # Handle routing based on next agent
-        if orchestrator_result.get("next_agent") == "compute":
+        if orchestrator_result.get("action", {}).get("agent") == "compute":
             # Process through compute agent
             compute_agent = ComputeAgent()
             compute_result = await compute_agent.process(orchestrator_result["context"])
-            specialist_name = compute_result.get("next_agent")
+            specialist_name = compute_result.get("action", {}).get("agent", compute_result.get("next_agent"))
             
-            if compute_result.get("next_agent") == "unavailable":
+            if compute_result.get("action", {}).get("agent", compute_result.get("next_agent")) == "unavailable":
                 specialist_name = compute_result.get("specialist_name", "unknown")
                 cloud_map = {
                     "ec2_specialist": "AWS EC2",
@@ -439,7 +439,7 @@ async def chat(request: ChatRequest, raw_request: Request):
                     mode=current_mode
                 )
         
-        elif orchestrator_result["next_agent"] == "clarification":
+        elif orchestrator_result.get("action", {}).get("agent") == "clarification":
             # Ask Business questions via Clarification agent
             asked_fields = session.metadata.get('asked_fields', []) if hasattr(session, 'metadata') else []
             context = {
@@ -470,7 +470,7 @@ async def chat(request: ChatRequest, raw_request: Request):
         
         else:
             return ChatResponse(
-                response=f"The {orchestrator_result['next_agent']} agent is not yet implemented. Currently, I can only help with creating VMs in GCP.",
+                response=f"The {orchestrator_result.get('action', {}).get('agent', 'requested')} agent is not yet implemented. Currently, I can only help with creating VMs in GCP.",
                 needs_clarification=False,
                 session_id=session_id,
                 status="gathering_info",
