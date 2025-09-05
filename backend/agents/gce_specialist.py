@@ -47,6 +47,16 @@ class GCESpecialistAgent(BaseAgent):
             "skip_quota_check": os.getenv('GCE_SKIP_QUOTA_CHECK', 'true').lower() == 'true'
         }
     
+    async def prepare_context(self, input_data: Any) -> Dict[str, Any]:
+        """Prepare context for GCE specialist processing"""
+        if isinstance(input_data, dict):
+            return input_data
+        return {"raw_request": str(input_data)}
+    
+    async def process(self, context: Any, session_id: str = None, progress_callback=None) -> Dict[str, Any]:
+        """Process request - delegates to create_instance for compatibility"""
+        return await self.create_instance(context)
+    
     def get_available_tools(self) -> List[Dict[str, Any]]:
         """Define available tools for GCE provisioning"""
         return [
@@ -129,7 +139,7 @@ class GCESpecialistAgent(BaseAgent):
         }}
         """
         
-        analysis = self._llm_reason(reflection_prompt)
+        analysis = await self.reason(reflection_prompt)
         
         # Learn successful provisioning patterns
         if analysis.get("success_patterns"):
@@ -157,7 +167,7 @@ class GCESpecialistAgent(BaseAgent):
         
         return analysis
     
-    def _extract_vm_requirements(self, raw_request: str, context: Dict[str, Any]) -> Dict[str, Any]:
+    async def _extract_vm_requirements(self, raw_request: str, context: Dict[str, Any]) -> Dict[str, Any]:
         """
         Extract VM requirements from raw request with intelligent corrections
         Focus on TAXI required fields only
@@ -239,7 +249,7 @@ class GCESpecialistAgent(BaseAgent):
         - machineType: Use exact GCP machine type strings (e.g., "e2-small", "n1-standard-1")
         """
         
-        result = self._llm_reason(extraction_prompt)
+        result = await self.reason(extraction_prompt)
         
         # Merge business metadata from context into the result
         if business_metadata:
@@ -348,7 +358,7 @@ class GCESpecialistAgent(BaseAgent):
         }}
         """
         
-        analysis = self._llm_reason(learning_prompt)
+        analysis = await self.reason(learning_prompt)
         
         # Build configuration recommendation model
         config_model = {
@@ -387,23 +397,23 @@ class GCESpecialistAgent(BaseAgent):
         
         return analysis
     
-    def execute_action(self, action: Action) -> Any:
+    async def execute_action(self, action: Action) -> Any:
         """Execute the chosen action"""
         if action.name == "validate_configuration":
-            return self._validate_config_llm(action.parameters.get("vm_request"))
+            return await self._validate_config_llm(action.parameters.get("vm_request"))
         elif action.name == "suggest_improvements":
-            return self._suggest_improvements(action.parameters.get("vm_request"))
+            return await self._suggest_improvements(action.parameters.get("vm_request"))
         elif action.name == "build_taxi_payload":
             return self._build_taxi_payload(action.parameters.get("vm_request"))
         elif action.name == "provision_instance":
-            return self._provision_instance(action.parameters.get("taxi_payload"))
+            return await self._provision_instance(action.parameters.get("taxi_payload"))
         elif action.name == "check_quota":
-            return self._check_quota(action.parameters.get("vm_request"))
+            return await self._check_quota(action.parameters.get("vm_request"))
         else:
             logger.warning(f"Unknown action: {action.name}")
             return None
     
-    def _validate_config_llm(self, vm_request: Dict[str, Any]) -> Dict[str, Any]:
+    async def _validate_config_llm(self, vm_request: Dict[str, Any]) -> Dict[str, Any]:
         """
         Validate GCE configuration using LLM reasoning
         NO hardcoded rules - intelligent validation only
@@ -442,10 +452,10 @@ class GCESpecialistAgent(BaseAgent):
         }}
         """
         
-        result = self._llm_reason(validation_prompt)
+        result = await self.reason(validation_prompt)
         return result
     
-    def _suggest_improvements(self, vm_request: Dict[str, Any]) -> Dict[str, Any]:
+    async def _suggest_improvements(self, vm_request: Dict[str, Any]) -> Dict[str, Any]:
         """
         Suggest configuration improvements using LLM reasoning
         Based on best practices and patterns
@@ -482,7 +492,7 @@ class GCESpecialistAgent(BaseAgent):
         }}
         """
         
-        result = self._llm_reason(improvement_prompt)
+        result = await self.reason(improvement_prompt)
         return result
     
     def _build_taxi_payload(self, vm_request: VMRequest) -> Dict[str, Any]:
@@ -514,7 +524,6 @@ class GCESpecialistAgent(BaseAgent):
                 "project": "Which GCP project should this run in?",
                 "lineOfBusiness": "What is your line of business (RETAIL, ISTS, or EDML)?",
                 "costCenter": "What is the 5-digit cost center?",
-                "id": "What email should be used as the requestor ID?",
                 "useType": "Is this for an app or a database?",
                 "os": "Which OS image should we use (LINUX_RHEL8, LINUX_RHEL9, WINDOWS_19, WINDOWS_22)?"
             }
@@ -614,7 +623,7 @@ class GCESpecialistAgent(BaseAgent):
 
         return taxi_payload
     
-    def _provision_instance(self, taxi_payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def _provision_instance(self, taxi_payload: Dict[str, Any]) -> Dict[str, Any]:
         """
         Provision instance via TAXI API
         Handles the actual API call with intelligent error handling
@@ -657,7 +666,7 @@ class GCESpecialistAgent(BaseAgent):
                 }}
                 """
                 
-                error_analysis = self._llm_reason(error_prompt)
+                error_analysis = await self.reason(error_prompt)
                 
                 return {
                     "success": False,
@@ -687,7 +696,7 @@ class GCESpecialistAgent(BaseAgent):
                 "payload_sent": taxi_payload  # Include payload for debugging
             }
     
-    def _check_quota(self, vm_request: Dict[str, Any]) -> Dict[str, Any]:
+    async def _check_quota(self, vm_request: Dict[str, Any]) -> Dict[str, Any]:
         """
         Check resource availability and quota using intelligent reasoning
         """
@@ -713,7 +722,7 @@ class GCESpecialistAgent(BaseAgent):
         }}
         """
         
-        result = self._llm_reason(quota_prompt)
+        result = await self.reason(quota_prompt)
         return result
     
     async def create_instance(self, context: Dict[str, Any], config: Dict[str, Any] = None) -> Dict[str, Any]:
@@ -786,7 +795,7 @@ class GCESpecialistAgent(BaseAgent):
             self.current_step += 1
             await self.emit_progress("extracting", "Extracting VM requirements", 20)
             
-            extraction_result = self._extract_vm_requirements(raw_request, context)
+            extraction_result = await self._extract_vm_requirements(raw_request, context)
             extracted_fields = extraction_result.get("extracted_fields", {})
             
             # Check if clarification needed
@@ -833,7 +842,7 @@ class GCESpecialistAgent(BaseAgent):
         if not config.get("skip_validation"):
             self.current_step += 1
             await self.emit_progress("validating", "Validating configuration", 40)
-            validation = self._validate_config_llm(vm_request.model_dump(exclude_none=True))
+            validation = await self._validate_config_llm(vm_request.model_dump(exclude_none=True))
             
             if not validation.get("valid", False):
                 severe_issues = [i for i in validation.get("issues", []) if i.get("severity") == "error"]
@@ -850,7 +859,7 @@ class GCESpecialistAgent(BaseAgent):
         if not config.get("skip_improvements"):
             self.current_step += 1
             await self.emit_progress("optimizing", "Optimizing configuration", 50)
-            improvements = self._suggest_improvements(vm_request.model_dump(exclude_none=True))
+            improvements = await self._suggest_improvements(vm_request.model_dump(exclude_none=True))
         
         # Step 4: Build TAXI payload
         self.current_step += 1
@@ -863,7 +872,7 @@ class GCESpecialistAgent(BaseAgent):
         # Step 5: Provision instance
         self.current_step += 1
         await self.emit_progress("provisioning", "Provisioning instance", 90)
-        result = self._provision_instance(taxi_payload)
+        result = await self._provision_instance(taxi_payload)
         
         await self.emit_progress("complete", "Instance provisioning complete", 100)
         
@@ -885,10 +894,10 @@ class GCESpecialistAgent(BaseAgent):
                 vm_request.dict(exclude_none=True) if hasattr(vm_request, 'dict') else vm_request
             )
         )
-        validation = self._validate_config_llm(vm_dict)
+        validation = await self._validate_config_llm(vm_dict)
         
         # Check quota availability
-        quota_check = self._check_quota(vm_dict)
+        quota_check = await self._check_quota(vm_dict)
         
         return {
             "valid": validation.get("valid", False) and quota_check.get("likely_available", True),

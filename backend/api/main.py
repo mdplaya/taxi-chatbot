@@ -288,7 +288,7 @@ async def chat(request: ChatRequest, raw_request: Request):
         if orchestrator_result.get("action", {}).get("agent") == "compute":
             # Process through compute agent
             compute_agent = ComputeAgent()
-            compute_result = await compute_agent.process(orchestrator_result["context"])
+            compute_result = await compute_agent.process(orchestrator_result["action"]["parameters"])
             specialist_name = compute_result.get("action", {}).get("agent", compute_result.get("next_agent"))
             
             if compute_result.get("action", {}).get("agent", compute_result.get("next_agent")) == "unavailable":
@@ -310,12 +310,14 @@ async def chat(request: ChatRequest, raw_request: Request):
                 # Route to GCE specialist
                 gce_agent = GCESpecialistAgent()
                 provision_result = await gce_agent.create_instance(
-                    compute_result.get("context", orchestrator_result["context"])
+                    compute_result.get("context", orchestrator_result["action"]["parameters"])
                 )
                 
                 # Check if clarification needed
                 if provision_result.get("needs_clarification"):
                     questions = provision_result.get("questions", [])
+                    missing_fields = provision_result.get("missing_fields", [])
+                    business_fields = {"lineOfBusiness", "id", "appEnvironment", "appEnvironmentSubtype", "costCenter"}
                     
                     # Store partial data in session
                     if provision_result.get("partial_data"):
@@ -328,10 +330,33 @@ async def chat(request: ChatRequest, raw_request: Request):
                                 except (ValueError, ValidationError):
                                     logger.warning(f"[API] Ignoring invalid value for {key}: {normalized_value}")
                     
+                    # If any business fields are missing, use Clarification Agent to ask them (single source of truth)
+                    if any(f in business_fields for f in (missing_fields or [])):
+                        asked_fields = session.metadata.get('asked_fields', []) if hasattr(session, 'metadata') else []
+                        context = {
+                            'raw_request': request.message,
+                            'conversation_history': session.messages if hasattr(session, 'messages') else [],
+                            'session_id': session_id,
+                            'asked_fields': asked_fields
+                        }
+                        clarification_agent = ClarificationAgent(context=context)
+                        clarification_result = await clarification_agent.get_clarifications(
+                            session.vm_request,
+                            context
+                        )
+                        return ChatResponse(
+                            response="I need some additional information:",
+                            needs_clarification=True,
+                            questions=clarification_result.get("questions", []),
+                            session_id=session_id,
+                            status=session.status,
+                            mode=current_mode
+                        )
+                    
                     session.status = "gathering_info"
                     legacy_sessions[session_id] = session
                     
-                    # Format questions for client
+                    # Format questions for client (technical/resource focus)
                     formatted_questions = []
                     for q in questions[:3]:  # Ask up to 3 questions at a time
                         if isinstance(q, str):
