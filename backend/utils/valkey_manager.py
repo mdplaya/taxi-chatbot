@@ -1,348 +1,226 @@
 """
-Valkey Manager for Agent Memory Persistence
-Handles all Valkey operations for the agentic system
+Simple Valkey Manager
+Basic session storage operations
 """
 
+from typing import Dict, Any, Optional, List
 import json
-import asyncio
-from typing import Any, Dict, Optional, List
-from datetime import datetime, timedelta
-import valkey
-from valkey.asyncio import Valkey as AsyncValkey
 import logging
+from datetime import datetime, timedelta
+import redis
 import os
-from dotenv import load_dotenv
 
-load_dotenv()
 logger = logging.getLogger(__name__)
 
-class ValkeyManager:
+
+class SimpleValkeyManager:
     """
-    Manages Valkey connections and operations for agent memory persistence
+    Basic Redis/Valkey session management
+    Simplified to core key-value operations
     """
     
     def __init__(self):
-        self.host = os.getenv('VALKEY_HOST', 'localhost')
-        self.port = int(os.getenv('VALKEY_PORT', 6379))
-        self.db = int(os.getenv('VALKEY_AGENT_DB', 1))
-        # Treat empty string as None for password
-        password_env = os.getenv('VALKEY_PASSWORD')
-        self.password = password_env if password_env and password_env.strip() else None
-        self.pool_size = int(os.getenv('VALKEY_CONNECTION_POOL_SIZE', 10))
-        
-        # TTL configurations
-        self.agent_memory_ttl = int(os.getenv('AGENT_MEMORY_TTL', 86400))
-        self.short_term_ttl = int(os.getenv('SHORT_TERM_MEMORY_TTL', 3600))
-        self.long_term_ttl = int(os.getenv('LONG_TERM_MEMORY_TTL', 604800))
-        self.correction_ttl = int(os.getenv('CORRECTION_MEMORY_TTL', 2592000))
-        
-        # Initialize connection pools
-        self._init_connection_pools()
+        self.client = None
+        self.connected = False
+        self.ttl = int(os.getenv("VALKEY_SESSION_TTL", "3600"))  # 1 hour default
+        self._connect()
     
-    def _init_connection_pools(self):
-        """Initialize sync and async connection pools"""
-        # Build connection kwargs
-        async_conn_kwargs = {
-            'host': self.host,
-            'port': self.port,
-            'db': self.db,
-            'max_connections': self.pool_size,
-            'decode_responses': True
-        }
-        
-        sync_conn_kwargs = {
-            'host': self.host,
-            'port': self.port,
-            'db': self.db,
-            'max_connections': self.pool_size,
-            'decode_responses': True
-        }
-        
-        # Only add password if it's actually set (now None if empty)
-        if self.password:
-            async_conn_kwargs['password'] = self.password
-            sync_conn_kwargs['password'] = self.password
-        
-        # Async pool for agent operations
-        self.async_pool = valkey.asyncio.ConnectionPool(**async_conn_kwargs)
-        
-        # Sync pool for initialization and cleanup
-        self.sync_pool = valkey.ConnectionPool(**sync_conn_kwargs)
-    
-    async def get_async_client(self) -> AsyncValkey:
-        """Get async Valkey client from pool"""
-        return AsyncValkey(connection_pool=self.async_pool)
-    
-    def get_sync_client(self) -> valkey.Valkey:
-        """Get sync Valkey client from pool"""
-        return valkey.Valkey(connection_pool=self.sync_pool)
-    
-    # Agent Memory Operations
-    async def save_agent_memory(
-        self, 
-        agent_name: str, 
-        session_id: str, 
-        memory_type: str,
-        data: Dict[str, Any],
-        ttl: Optional[int] = None
-    ) -> bool:
-        """Save agent memory to Valkey"""
+    def _connect(self):
+        """Connect to Valkey/Redis"""
         try:
-            client = await self.get_async_client()
-            key = f"agents:{agent_name}:session:{session_id}:{memory_type}"
+            host = os.getenv("VALKEY_HOST", "localhost")
+            port = int(os.getenv("VALKEY_PORT", "6379"))
+            db = int(os.getenv("VALKEY_DB", "0"))
+            password = os.getenv("VALKEY_PASSWORD")
             
-            # Serialize data
-            serialized = json.dumps(data, default=str)
+            self.client = redis.Redis(
+                host=host,
+                port=port,
+                db=db,
+                password=password,
+                decode_responses=True
+            )
             
-            # Set with TTL
-            ttl = ttl or self.agent_memory_ttl
-            await client.setex(key, ttl, serialized)
+            # Test connection
+            self.client.ping()
+            self.connected = True
+            logger.info(f"Connected to Valkey at {host}:{port}")
             
-            # Add to session index
-            index_key = f"sessions:{session_id}:agents"
-            await client.sadd(index_key, agent_name)
-            await client.expire(index_key, ttl)
+        except Exception as e:
+            logger.warning(f"Failed to connect to Valkey: {e}. Using in-memory fallback.")
+            self.connected = False
+            self.memory_store = {}  # Fallback to in-memory
+    
+    async def store_session(self, session_id: str, data: Dict[str, Any]) -> bool:
+        """Store session data"""
+        try:
+            key = f"session:{session_id}"
+            value = json.dumps(data, default=str)
             
-            logger.info(f"Saved {memory_type} memory for {agent_name}:{session_id}")
+            if self.connected:
+                self.client.setex(key, self.ttl, value)
+            else:
+                # In-memory fallback
+                self.memory_store[key] = {
+                    "data": value,
+                    "expires": datetime.now() + timedelta(seconds=self.ttl)
+                }
+            
+            logger.debug(f"Stored session {session_id}")
             return True
             
         except Exception as e:
-            logger.error(f"Error saving agent memory: {e}")
+            logger.error(f"Failed to store session {session_id}: {e}")
             return False
-        finally:
-            await client.aclose()
     
-    async def load_agent_memory(
-        self,
-        agent_name: str,
-        session_id: str,
-        memory_type: str
-    ) -> Optional[Dict[str, Any]]:
-        """Load agent memory from Valkey"""
+    async def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve session data"""
         try:
-            client = await self.get_async_client()
-            key = f"agents:{agent_name}:session:{session_id}:{memory_type}"
+            key = f"session:{session_id}"
             
-            data = await client.get(key)
-            if data:
-                return json.loads(data)
+            if self.connected:
+                value = self.client.get(key)
+            else:
+                # In-memory fallback
+                if key in self.memory_store:
+                    entry = self.memory_store[key]
+                    if entry["expires"] > datetime.now():
+                        value = entry["data"]
+                    else:
+                        del self.memory_store[key]
+                        value = None
+                else:
+                    value = None
+            
+            if value:
+                return json.loads(value)
+            
             return None
             
         except Exception as e:
-            logger.error(f"Error loading agent memory: {e}")
+            logger.error(f"Failed to get session {session_id}: {e}")
             return None
-        finally:
-            await client.aclose()
     
-    # Cross-Session Learning
-    async def save_learned_pattern(
-        self,
-        agent_name: str,
-        pattern_type: str,
-        pattern_data: Dict[str, Any],
-        confidence: float
-    ) -> bool:
-        """Save learned pattern for cross-session use"""
+    async def update_session(self, session_id: str, updates: Dict[str, Any]) -> bool:
+        """Update existing session data"""
         try:
-            client = await self.get_async_client()
+            # Get current data
+            current = await self.get_session(session_id)
+            if not current:
+                current = {}
             
-            # Only save high-confidence patterns
-            threshold = float(os.getenv('PATTERN_CONFIDENCE_THRESHOLD', 0.7))
-            if confidence < threshold:
+            # Merge updates
+            current.update(updates)
+            
+            # Store back
+            return await self.store_session(session_id, current)
+            
+        except Exception as e:
+            logger.error(f"Failed to update session {session_id}: {e}")
+            return False
+    
+    async def delete_session(self, session_id: str) -> bool:
+        """Delete session data"""
+        try:
+            key = f"session:{session_id}"
+            
+            if self.connected:
+                self.client.delete(key)
+            else:
+                # In-memory fallback
+                if key in self.memory_store:
+                    del self.memory_store[key]
+            
+            logger.debug(f"Deleted session {session_id}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to delete session {session_id}: {e}")
+            return False
+    
+    async def session_exists(self, session_id: str) -> bool:
+        """Check if session exists"""
+        try:
+            key = f"session:{session_id}"
+            
+            if self.connected:
+                return bool(self.client.exists(key))
+            else:
+                # In-memory fallback
+                if key in self.memory_store:
+                    if self.memory_store[key]["expires"] > datetime.now():
+                        return True
+                    else:
+                        del self.memory_store[key]
                 return False
-            
-            key = f"agents:{agent_name}:patterns:{pattern_type}"
-            pattern_id = f"{datetime.now().isoformat()}_{confidence}"
-            
-            # Store as sorted set with confidence as score
-            await client.zadd(
-                key,
-                {json.dumps(pattern_data): confidence}
-            )
-            
-            # Keep only top 100 patterns
-            await client.zremrangebyrank(key, 0, -101)
-            
-            # Set TTL
-            await client.expire(key, self.correction_ttl)
-            
-            logger.info(f"Saved learned pattern for {agent_name}:{pattern_type}")
-            return True
-            
+                
         except Exception as e:
-            logger.error(f"Error saving learned pattern: {e}")
+            logger.error(f"Failed to check session {session_id}: {e}")
             return False
-        finally:
-            await client.aclose()
     
-    async def get_learned_patterns(
-        self,
-        agent_name: str,
-        pattern_type: str,
-        min_confidence: float = 0.5
-    ) -> List[Dict[str, Any]]:
-        """Get learned patterns above confidence threshold"""
+    async def list_sessions(self, pattern: str = "*") -> List[str]:
+        """List session IDs matching pattern"""
         try:
-            client = await self.get_async_client()
-            key = f"agents:{agent_name}:patterns:{pattern_type}"
+            search_pattern = f"session:{pattern}"
+            sessions = []
             
-            # Get patterns with score >= min_confidence
-            patterns = await client.zrangebyscore(
-                key,
-                min_confidence,
-                1.0,
-                withscores=True
-            )
+            if self.connected:
+                keys = self.client.keys(search_pattern)
+                sessions = [k.replace("session:", "") for k in keys]
+            else:
+                # In-memory fallback
+                now = datetime.now()
+                for key in list(self.memory_store.keys()):
+                    if key.startswith("session:"):
+                        if self.memory_store[key]["expires"] > now:
+                            sessions.append(key.replace("session:", ""))
+                        else:
+                            del self.memory_store[key]
             
-            result = []
-            for pattern_json, confidence in patterns:
-                pattern_data = json.loads(pattern_json)
-                pattern_data['confidence'] = confidence
-                result.append(pattern_data)
-            
-            return result
+            return sessions
             
         except Exception as e:
-            logger.error(f"Error getting learned patterns: {e}")
+            logger.error(f"Failed to list sessions: {e}")
             return []
-        finally:
-            await client.aclose()
     
-    # Session Management
-    async def save_session(
-        self,
-        session_id: str,
-        session_data: Dict[str, Any],
-        ttl: Optional[int] = None
-    ) -> bool:
-        """Save session data"""
-        try:
-            client = await self.get_async_client()
-            key = f"sessions:{session_id}:data"
-            
-            serialized = json.dumps(session_data, default=str)
-            ttl = ttl or self.agent_memory_ttl
-            
-            await client.setex(key, ttl, serialized)
-            
-            # Add to active sessions set
-            await client.sadd("active_sessions", session_id)
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error saving session: {e}")
-            return False
-        finally:
-            await client.aclose()
+    def cleanup_expired(self):
+        """Clean up expired sessions (in-memory only)"""
+        if not self.connected and hasattr(self, 'memory_store'):
+            now = datetime.now()
+            expired = [k for k, v in self.memory_store.items() 
+                      if v["expires"] <= now]
+            for key in expired:
+                del self.memory_store[key]
+            if expired:
+                logger.info(f"Cleaned up {len(expired)} expired sessions")
     
-    async def load_session(
-        self,
-        session_id: str
-    ) -> Optional[Dict[str, Any]]:
-        """Load session data"""
+    def get_stats(self) -> Dict[str, Any]:
+        """Get storage statistics"""
         try:
-            client = await self.get_async_client()
-            key = f"sessions:{session_id}:data"
-            
-            data = await client.get(key)
-            if data:
-                return json.loads(data)
-            return None
-            
+            if self.connected:
+                info = self.client.info()
+                return {
+                    "connected": True,
+                    "db_size": self.client.dbsize(),
+                    "used_memory": info.get("used_memory_human", "unknown")
+                }
+            else:
+                return {
+                    "connected": False,
+                    "sessions_in_memory": len([k for k in self.memory_store.keys() 
+                                              if k.startswith("session:")])
+                }
         except Exception as e:
-            logger.error(f"Error loading session: {e}")
-            return None
-        finally:
-            await client.aclose()
-    
-    # Conversation History
-    async def append_conversation(
-        self,
-        session_id: str,
-        message: Dict[str, Any]
-    ) -> bool:
-        """Append message to conversation history"""
-        try:
-            client = await self.get_async_client()
-            key = f"sessions:{session_id}:conversation"
-            
-            # Add to list
-            await client.rpush(key, json.dumps(message, default=str))
-            
-            # Trim to last 100 messages
-            await client.ltrim(key, -100, -1)
-            
-            # Set TTL
-            await client.expire(key, self.agent_memory_ttl)
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error appending conversation: {e}")
-            return False
-        finally:
-            await client.aclose()
-    
-    async def get_conversation_history(
-        self,
-        session_id: str,
-        limit: int = 10
-    ) -> List[Dict[str, Any]]:
-        """Get recent conversation history"""
-        try:
-            client = await self.get_async_client()
-            key = f"sessions:{session_id}:conversation"
-            
-            # Get last N messages
-            messages = await client.lrange(key, -limit, -1)
-            
-            return [json.loads(msg) for msg in messages]
-            
-        except Exception as e:
-            logger.error(f"Error getting conversation history: {e}")
-            return []
-        finally:
-            await client.aclose()
-    
-    # Health Check
-    async def health_check(self) -> bool:
-        """Check Valkey connection health"""
-        try:
-            client = await self.get_async_client()
-            await client.ping()
-            return True
-        except Exception as e:
-            logger.error(f"Valkey health check failed: {e}")
-            return False
-        finally:
-            await client.aclose()
-    
-    # Cleanup
-    async def cleanup_expired_sessions(self) -> int:
-        """Clean up expired sessions"""
-        try:
-            client = await self.get_async_client()
-            
-            # Get all active sessions
-            sessions = await client.smembers("active_sessions")
-            
-            expired_count = 0
-            for session_id in sessions:
-                # Check if session data exists
-                key = f"sessions:{session_id}:data"
-                if not await client.exists(key):
-                    await client.srem("active_sessions", session_id)
-                    expired_count += 1
-            
-            logger.info(f"Cleaned up {expired_count} expired sessions")
-            return expired_count
-            
-        except Exception as e:
-            logger.error(f"Error cleaning up sessions: {e}")
-            return 0
-        finally:
-            await client.aclose()
+            logger.error(f"Failed to get stats: {e}")
+            return {"error": str(e)}
 
-# Singleton instance
-valkey_manager = ValkeyManager()
+
+# Global instance for backward compatibility
+_valkey_manager = None
+
+def get_valkey_manager() -> SimpleValkeyManager:
+    """Get or create Valkey manager instance"""
+    global _valkey_manager
+    if _valkey_manager is None:
+        _valkey_manager = SimpleValkeyManager()
+    return _valkey_manager
