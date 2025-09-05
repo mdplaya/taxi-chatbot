@@ -55,6 +55,27 @@ class ClarificationAgent(BaseAgent):
             "conversation_style": "friendly"
         }
     
+    async def prepare_context(self, input_data: Any) -> Dict[str, Any]:
+        """Prepare context for clarification process"""
+        if isinstance(input_data, dict):
+            return input_data
+        return {"user_input": str(input_data)}
+    
+    async def process(self, context: Any, session_id: str = None, progress_callback=None) -> Dict[str, Any]:
+        """Process clarification request - delegates to get_clarifications"""
+        self.progress_callback = progress_callback
+        
+        # Extract VM request from context if available
+        vm_request = context.get('vm_request') if isinstance(context, dict) else None
+        if not vm_request:
+            # Create empty VM request if not provided
+            from models.taxi_models import VMRequest
+            vm_request = VMRequest()
+        
+        # Call the existing get_clarifications method
+        result = await self.get_clarifications(vm_request, session_id)
+        return result
+    
     def get_available_tools(self) -> List[Dict[str, Any]]:
         """Define clarification agent's tools"""
         return [
@@ -206,7 +227,7 @@ class ClarificationAgent(BaseAgent):
         }}
         """
         
-        result = self._llm_reason(show_prompt)
+        result = await self.reason(show_prompt)
         
         # Store in memory for learning
         self.memory.short_term.append({
@@ -285,7 +306,7 @@ class ClarificationAgent(BaseAgent):
             # Use configurable timeout from environment, default to 60 seconds
             clarification_timeout = float(os.getenv('CLARIFICATION_TIMEOUT', '60.0'))
             result = await asyncio.wait_for(
-                asyncio.create_task(asyncio.to_thread(self._llm_reason, question_prompt)),
+                self.reason(question_prompt),
                 timeout=clarification_timeout
             )
             questions = result.get("questions", [])
@@ -406,7 +427,7 @@ class ClarificationAgent(BaseAgent):
         }}
         """
         
-        result = self._llm_reason(correction_prompt)
+        result = await self.reason(correction_prompt)
         
         corrections = result.get("potential_corrections", [])
         
@@ -539,7 +560,7 @@ class ClarificationAgent(BaseAgent):
         }}
         """
 
-        result = self._llm_reason(normalize_prompt)
+        result = await self.reason(normalize_prompt)
 
         normalized = result.get("normalized_value")
         confidence = result.get("confidence", 0)
@@ -637,7 +658,7 @@ class ClarificationAgent(BaseAgent):
         }}
         """
         
-        result = self._llm_reason(confirmation_prompt)
+        result = await self.reason(confirmation_prompt)
         
         return {
             "complete": True,
@@ -686,7 +707,7 @@ class ClarificationAgent(BaseAgent):
         }}
         """
         
-        analysis = self._llm_reason(reflection_prompt)
+        analysis = await self.reason(reflection_prompt)
         
         # Learn better question phrasings
         if analysis.get("better_phrasings"):
@@ -749,7 +770,7 @@ class ClarificationAgent(BaseAgent):
         }}
         """
         
-        analysis = self._llm_reason(learning_prompt)
+        analysis = await self.reason(learning_prompt)
         
         # Build field-specific confidence model
         field_pattern = {
@@ -853,7 +874,7 @@ class ClarificationAgent(BaseAgent):
         }}
         """
         
-        result = self._llm_reason(correction_prompt)
+        result = await self.reason(correction_prompt)
         
         # Store correction pattern
         self.memory.corrections.append({
