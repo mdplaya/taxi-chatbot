@@ -7,7 +7,7 @@ from typing import Dict, Any, Optional, List
 import json
 import logging
 from datetime import datetime, timedelta
-import redis
+import valkey
 import os
 
 logger = logging.getLogger(__name__)
@@ -33,7 +33,7 @@ class SimpleValkeyManager:
             db = int(os.getenv("VALKEY_DB", "0"))
             password = os.getenv("VALKEY_PASSWORD")
             
-            self.client = redis.Redis(
+            self.client = valkey.Valkey(
                 host=host,
                 port=port,
                 db=db,
@@ -193,6 +193,18 @@ class SimpleValkeyManager:
                 del self.memory_store[key]
             if expired:
                 logger.info(f"Cleaned up {len(expired)} expired sessions")
+    
+    async def health_check(self) -> bool:
+        """Check if Valkey connection is healthy"""
+        try:
+            if self.connected:
+                self.client.ping()
+                return True
+            # In-memory fallback is always "healthy"
+            return True
+        except Exception as e:
+            logger.error(f"Valkey health check failed: {e}")
+            return False
     
     def get_stats(self) -> Dict[str, Any]:
         """Get storage statistics"""
