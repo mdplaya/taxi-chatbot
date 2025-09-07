@@ -508,10 +508,9 @@ class GCESpecialistAgent(BaseAgent):
         # Only map what we have; do not invent defaults
         filtered_dict = {k: v for k, v in vm_dict.items() if v is not None}
 
-        # Check for required fields
+        # Check for required fields (specialist scope only)
         required_fields = [
-            "appEnvironment", "os", "useType", "machineType", "zone",
-            "lineOfBusiness", "costCenter", "project", "id"
+            "project", "zone", "machineType"
         ]
         missing_fields = [f for f in required_fields if f not in filtered_dict or filtered_dict[f] is None]
 
@@ -521,11 +520,7 @@ class GCESpecialistAgent(BaseAgent):
             field_to_question = {
                 "machineType": "Which GCP machine type do you prefer (e.g., e2-small, n1-standard-1)?",
                 "zone": "Which GCP zone should we use (e.g., us-east4-a)?",
-                "project": "Which GCP project should this run in?",
-                "lineOfBusiness": "What is your line of business (RETAIL, ISTS, or EDML)?",
-                "costCenter": "What is the 5-digit cost center?",
-                "useType": "Is this for an app or a database?",
-                "os": "Which OS image should we use (LINUX_RHEL8, LINUX_RHEL9, WINDOWS_19, WINDOWS_22)?"
+                "project": "Which GCP project should this run in?"
             }
             for f in missing_fields:
                 q = field_to_question.get(f)

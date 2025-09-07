@@ -45,6 +45,12 @@ class ComputeAgent(BaseAgent):
             "aks_specialist": "Azure Kubernetes Service"
         }
     
+    async def prepare_context(self, input_data: Any) -> Dict[str, Any]:
+        """Prepare context for compute agent processing"""
+        if isinstance(input_data, dict):
+            return input_data
+        return {"raw_request": str(input_data)}
+    
     async def _get_available_specialists(self) -> List[Dict[str, Any]]:
         """Get list of available specialists from MCP server"""
         if self._available_specialists is not None:
@@ -135,7 +141,7 @@ class ComputeAgent(BaseAgent):
         }}
         """
         
-        analysis = self._llm_reason(reflection_prompt)
+        analysis = await self.reason(reflection_prompt)
         
         # Learn new extraction patterns
         if analysis.get("new_patterns"):
@@ -209,7 +215,7 @@ class ComputeAgent(BaseAgent):
         }}
         """
         
-        analysis = self._llm_reason(learning_prompt)
+        analysis = await self.reason(learning_prompt)
         
         # Build cloud detection confidence model
         if was_correct:
@@ -245,10 +251,10 @@ class ComputeAgent(BaseAgent):
         
         return analysis
     
-    def execute_action(self, action: Action) -> Any:
+    async def execute_action(self, action: Action) -> Any:
         """Execute the chosen action"""
         if action.name == "detect_compute_type":
-            return self._detect_compute_type(
+            return await self._detect_compute_type(
                 action.parameters.get("user_input", ""),
                 action.parameters.get("context", {})
             )
@@ -258,12 +264,12 @@ class ComputeAgent(BaseAgent):
                 "context": action.parameters.get("context")
             }
         elif action.name == "extract_resource_fields":
-            return self._extract_resource_fields(
+            return await self._extract_resource_fields(
                 action.parameters.get("user_input", ""),
                 action.parameters.get("context", {})
             )
         elif action.name == "apply_corrections":
-            return self._apply_corrections(
+            return await self._apply_corrections(
                 action.parameters.get("user_input", "")
             )
         else:
@@ -314,7 +320,7 @@ class ComputeAgent(BaseAgent):
         }}
         """
         
-        result = self._llm_reason(routing_prompt)
+        result = await self.reason(routing_prompt)
         
         # Verify specialist availability
         if result.get("specialist"):
@@ -327,7 +333,7 @@ class ComputeAgent(BaseAgent):
                 
         return result
 
-    def _extract_resource_fields(self, user_input: str, context: Dict[str, Any]) -> Dict[str, Any]:
+    async def _extract_resource_fields(self, user_input: str, context: Dict[str, Any]) -> Dict[str, Any]:
         """
         Extract only resource-level fields from the user input:
         - os: LINUX_RHEL8 | LINUX_RHEL9 | WINDOWS_19 | WINDOWS_22
@@ -346,7 +352,7 @@ class ComputeAgent(BaseAgent):
             "reasoning": "brief"
         }}
         """
-        result = self._llm_reason(prompt)
+        result = await self.reason(prompt)
         os_val = result.get("os")
         use_type_val = result.get("useType")
         return {
@@ -358,10 +364,47 @@ class ComputeAgent(BaseAgent):
             }
         }
 
-    def _extract_requirements_llm(self, user_input: str, context: Dict[str, Any]) -> Dict[str, Any]:
+    def _detect_environment_with_confidence(self, text: str) -> Dict:
+        """Detect environment with confidence scoring"""
+        lower_text = text.lower()
+        patterns = {
+            "PROD": ["production", "prod"],
+            "NONPROD": ["development", "dev", "test", "testing", "staging", "stage", "qa", "quality"]
+        }
+        
+        matches = []
+        for env, keywords in patterns.items():
+            for keyword in keywords:
+                if keyword in lower_text:
+                    # Longer keywords get higher weight
+                    matches.append((env, len(keyword)))
+        
+        if not matches:
+            return {"environment": None, "confidence": 0.0, "candidates": []}
+        
+        # Sort by keyword length (longer = more specific)
+        matches.sort(key=lambda x: x[1], reverse=True)
+        best_match = matches[0][0]
+        
+        # Calculate confidence
+        unique_envs = list(set(m[0] for m in matches))
+        if len(unique_envs) == 1:
+            # All keywords point to same environment
+            confidence = 0.95 if len(matches) > 1 else 0.9
+        else:
+            # Conflicting signals - lower confidence
+            confidence = 0.5
+        
+        return {
+            "environment": best_match,
+            "confidence": confidence,
+            "candidates": unique_envs
+        }
+    
+    async def _extract_requirements_llm(self, user_input: str, context: Dict[str, Any]) -> Dict[str, Any]:
         """
         LLM-based extraction of high-level compute requirements for back-compat tests.
-        Returns provider and requirements (environment/os/machine_type/zone), if any.
+        Returns provider and requirements (os/machine_type/zone), if any.
         """
         prompt = f"""
         Extract compute requirements and provider from this text:
@@ -370,7 +413,6 @@ class ComputeAgent(BaseAgent):
         Respond JSON:
         {{
             "requirements": {{
-                "environment": "PROD|NONPROD|null",
                 "os": "LINUX_RHEL8|LINUX_RHEL9|WINDOWS_19|WINDOWS_22|null",
                 "machine_type": "e.g., n1-standard-1|null",
                 "zone": "e.g., us-east4-a|null"
@@ -379,9 +421,9 @@ class ComputeAgent(BaseAgent):
             "confidence": 0.0-1.0
         }}
         """
-        return self._llm_reason(prompt)
+        return await self.reason(prompt)
     
-    def _apply_corrections(self, user_input: str) -> str:
+    async def _apply_corrections(self, user_input: str) -> str:
         """
         Apply intelligent corrections for common typos and variations
         Returns corrected input
@@ -405,7 +447,7 @@ class ComputeAgent(BaseAgent):
         }}
         """
         
-        result = self._llm_reason(corrections_prompt)
+        result = await self.reason(corrections_prompt)
         return result.get("corrected_input", user_input)
     
     async def process(self, context: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
@@ -433,7 +475,7 @@ class ComputeAgent(BaseAgent):
         routing_decision = await self._detect_compute_type(raw_request, context)
 
         # Enrich context with resource-level fields (os, useType)
-        resource_fields = self._extract_resource_fields(raw_request, context)
+        resource_fields = await self._extract_resource_fields(raw_request, context)
         if resource_fields:
             er = dict(context.get("extracted_requirements", {}))
             # Only set canonical resource-level keys
@@ -477,15 +519,25 @@ class ComputeAgent(BaseAgent):
         })
 
         # Back-compat: also return an extraction result for tests expecting llm_reasoning
-        extraction = self._extract_requirements_llm(raw_request, context)
+        extraction = await self._extract_requirements_llm(raw_request, context)
         vm_request = extraction.get("requirements", {})
+        # Sanitize: never include business fields from compute agent
+        for k in [
+            "environment",
+            "lineOfBusiness",
+            "costCenter",
+            "id",
+            "appEnvironment",
+            "appEnvironmentSubtype",
+        ]:
+            vm_request.pop(k, None)
         provider = extraction.get("provider") or context.get("provider")
 
         return {
             "vm_request": vm_request,
             "provider": provider,
             "mode": "llm_reasoning",
-            "reasoning_chain": self._get_reasoning_chain(),
+            "reasoning_chain": getattr(self, 'reasoning_chain', []),
             # Include routing data for integration
             "next_agent": specialist,
             "context": context,

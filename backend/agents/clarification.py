@@ -151,38 +151,21 @@ class ClarificationAgent(BaseAgent):
         
         missing_fields = vm_request.get_missing_fields()
 
-        # Try LLM-powered guess for business metadata (lineOfBusiness) if missing
-        # This is probabilistic; only apply when confidence crosses a threshold.
-        try:
-            if "lineOfBusiness" in missing_fields:
-                threshold_str = os.getenv("CLARIFICATION_LOB_GUESS_THRESHOLD", "0.75")
-                try:
-                    lob_threshold = float(threshold_str)
-                except ValueError:
-                    lob_threshold = 0.75
+        # Do not guess lineOfBusiness; Orchestrator handles deterministic extraction.
 
-                raw_text = context.get('raw_request', '') if isinstance(context, dict) else ''
-                guess = await self._guess_business_metadata(raw_text)
-                guessed_lob = guess.get("lineOfBusiness")
-                confidence = float(guess.get("confidence", 0) or 0)
-
-                if guessed_lob in {"RETAIL", "ISTS", "EDML"} and confidence >= lob_threshold:
-                    from models.taxi_models import LineOfBusiness
-                    try:
-                        vm_request.lineOfBusiness = LineOfBusiness(guessed_lob)
-                        self.clarification_context["confirmed_values"]["lineOfBusiness"] = guessed_lob
-                        missing_fields = vm_request.get_missing_fields()
-                        self.memory.short_term.append({
-                            "type": "lob_guess",
-                            "value": guessed_lob,
-                            "confidence": confidence,
-                            "timestamp": datetime.now().isoformat()
-                        })
-                    except Exception as e:
-                        logger.warning(f"[Clarification] Failed to set guessed LOB: {e}")
-        except Exception as e:
-            logger.warning(f"[Clarification] Skipping LOB guess due to error: {e}")
-
+        # Check for ambiguous environment
+        extracted_req = context.get("extracted_requirements", {})
+        if extracted_req.get("environment_ambiguous"):
+            # Handle ambiguous environment detection
+            candidates = extracted_req.get("environment_candidates", [])
+            if candidates:
+                # Add environment to missing fields if not already there
+                if "environment" not in missing_fields:
+                    missing_fields.append("environment")
+                # Store candidates for question generation
+                self.clarification_context["environment_candidates"] = candidates
+                logger.info(f"[Clarification] Ambiguous environment detected with candidates: {candidates}")
+        
         # Show what we know first (after any guesses applied)
         known_info = await self._show_known_info(vm_request, missing_fields)
         
@@ -233,51 +216,7 @@ class ClarificationAgent(BaseAgent):
             "mode": "conversational"
         }
 
-    async def _guess_business_metadata(self, raw_request: str) -> Dict[str, Any]:
-        """
-        Use the LLM to guess business metadata from the raw request.
-        Returns dict with keys: lineOfBusiness (RETAIL|ISTS|EDML|None), confidence, evidence.
-        """
-        if not raw_request:
-            return {}
-
-        prompt = f"""
-        From this user request, infer the most likely line of business.
-        Choices: RETAIL, ISTS, EDML. If unsure, return null.
-
-        Request:
-        {raw_request}
-
-        Respond as JSON:
-        {{
-          "lineOfBusiness": "RETAIL|ISTS|EDML|null",
-          "confidence": 0.0-1.0,
-          "evidence": "short rationale"
-        }}
-        """
-
-        try:
-            result = await self.reason(prompt)
-            if not isinstance(result, dict):
-                return {}
-
-            lob = result.get("lineOfBusiness")
-            if lob not in {"RETAIL", "ISTS", "EDML"}:
-                lob = None
-
-            try:
-                confidence = float(result.get("confidence", 0) or 0)
-            except Exception:
-                confidence = 0.0
-
-            return {
-                "lineOfBusiness": lob,
-                "confidence": confidence,
-                "evidence": result.get("evidence", "")
-            }
-        except Exception as e:
-            logger.error(f"[Clarification] LOB guess error: {e}")
-            return {}
+    # Removed LOB guessing: keep Clarification LLM for question phrasing only.
     
     async def _show_known_info(self, vm_request: VMRequest, missing_fields: List[str]) -> str:
         """
@@ -333,6 +272,12 @@ class ClarificationAgent(BaseAgent):
         resource_fields = ["useType", "os"]
         specialist_fields = ["zone", "machineType"]
 
+        # Check if environment is in missing fields and we have candidates
+        env_candidates_context = ""
+        if "environment" in new_fields and hasattr(self, 'clarification_context') and "environment_candidates" in self.clarification_context:
+            candidates = self.clarification_context["environment_candidates"]
+            env_candidates_context = f"\nIMPORTANT: For environment field, we detected possible values: {candidates}. Ask which one they meant."
+        
         question_prompt = f"""
         Generate natural, conversational questions for missing information:
         
@@ -340,6 +285,7 @@ class ClarificationAgent(BaseAgent):
         Current context: {json.dumps({k: str(v) for k, v in vm_request.model_dump().items() if v is not None})}
         User's original request: {context.get('raw_request', '')}
         Conversation history: {json.dumps(context.get('conversation_history', [])[-5:])}
+        {env_candidates_context}
         
         IMPORTANT ORDERING:
         - Ask Business questions first (any order among them): {json.dumps(business_fields)}
@@ -359,7 +305,7 @@ class ClarificationAgent(BaseAgent):
         - zone: GCP deployment location
         - os: Operating system (RHEL8/9, Windows 2019/2022)
         - costCenter: 5-digit billing code
-        - appEnvironment: PROD or NONPROD
+        - appEnvironment: PROD or NONPROD (if ambiguous, ask which they meant)
         - lineOfBusiness: RETAIL, ISTS, or EDML
         - machineType: VM size (e2-small, n1-standard-1, etc.)
         - id: requestor email address (e.g., user@company.com)

@@ -61,6 +61,9 @@
 ## - You MUST run python -m venv .venv if you need to run python and the pythong environment does not exist
 
 ## Checklist and Planning
+- You MUST always show your code and files changed before actually editing files.
+- You MUST provide a detailed explaination of each change before editing the files, with the pros and cons of each action.   
+- You MUST present at least two options for changes that impliment more than 10 lines of code.
 - You MUST verify your plan against this checklist, before moving forward
 - You MUST provide the pros and cons to the user before executing any plan 
 - You MUST review your plan, before moving forward with any code change

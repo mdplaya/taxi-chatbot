@@ -7,7 +7,7 @@ import pytest
 import asyncio
 import os
 import sys
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch, MagicMock, AsyncMock
 import json
 
 # Add parent directory to path
@@ -97,8 +97,8 @@ class TestComputeAgent:
         agent = ComputeAgent()
         
         # Mock the LLM
-        with patch.object(agent, '_llm_reason') as mock_llm:
-            mock_llm.return_value = {
+        with patch.object(agent, 'reason') as mock_llm:
+            mock_llm.return_value = asyncio.coroutine(lambda: {
                 "requirements": {
                     "environment": "NONPROD",
                     "os": "LINUX_RHEL8",
@@ -106,7 +106,7 @@ class TestComputeAgent:
                 },
                 "provider": "gcp",
                 "confidence": 0.8
-            }
+            })()
             
             context = {
                 "raw_request": "I need a RHEL 8 VM in GCP",
@@ -159,12 +159,12 @@ class TestGCESpecialistAgent:
         agent = GCESpecialistAgent()
         
         # Mock the LLM
-        with patch.object(agent, '_llm_reason') as mock_llm:
-            mock_llm.return_value = {
+        with patch.object(agent, 'reason') as mock_llm:
+            mock_llm.return_value = asyncio.coroutine(lambda: {
                 "valid": True,
                 "issues": [],
                 "confidence": 0.9
-            }
+            })()
             
             vm_request = VMRequest()
             vm_request.machineType = "n1-standard-1"
@@ -251,20 +251,20 @@ class TestIntegration:
         gce = GCESpecialistAgent()
         
         # Mock all LLM calls
-        with patch.object(orchestrator, '_llm_reason') as mock_orch_llm, \
-             patch.object(compute, '_llm_reason') as mock_comp_llm, \
-             patch.object(gce, '_llm_reason') as mock_gce_llm:
+        with patch.object(orchestrator.reasoning_engine, 'reason') as mock_orch_llm, \
+             patch.object(compute, 'reason') as mock_comp_llm, \
+             patch.object(gce, 'reason') as mock_gce_llm:
             
-            # Setup orchestrator mock
-            mock_orch_llm.return_value = {
+            # Setup orchestrator mock (async)
+            mock_orch_llm.return_value = asyncio.coroutine(lambda: {
                 "intent": "create_compute",
                 "provider": "gcp",
                 "confidence": 0.9,
                 "reasoning": "User wants to create a VM in GCP"
-            }
+            })()
             
-            # Setup compute mock
-            mock_comp_llm.return_value = {
+            # Setup compute mock (async)
+            mock_comp_llm.return_value = asyncio.coroutine(lambda: {
                 "requirements": {
                     "environment": "NONPROD",
                     "os": "LINUX_RHEL8",
@@ -279,10 +279,10 @@ class TestIntegration:
                     "zone": "us-east4-a"
                 },
                 "confidence": 0.85
-            }
+            })()
             
-            # Setup GCE mock
-            mock_gce_llm.return_value = {
+            # Setup GCE mock (async)
+            mock_gce_llm.return_value = asyncio.coroutine(lambda: {
                 "valid": True,
                 "issues": [],
                 "payload": {
@@ -292,7 +292,7 @@ class TestIntegration:
                     "zone": "us-east4-a"
                 },
                 "confidence": 0.9
-            }
+            })()
             
             # Test orchestrator routing
             orch_result = await orchestrator.process({
@@ -408,16 +408,16 @@ class TestReActPattern:
         agent = TestReActAgent(name="TestReAct", goal="Test ReAct")
         
         # Mock LLM
-        with patch.object(agent, '_llm_reason') as mock_llm:
+        with patch.object(agent, 'reason') as mock_llm:
             mock_llm.side_effect = [
                 # Observation
-                {"observation": "test", "confidence": 0.8},
+                asyncio.coroutine(lambda: {"observation": "test", "confidence": 0.8})(),
                 # Thinking
-                {"reasoning": "need to act", "confidence": 0.8},
+                asyncio.coroutine(lambda: {"reasoning": "need to act", "confidence": 0.8})(),
                 # Action
-                {"action": "test_action", "parameters": {}, "confidence": 0.8},
+                asyncio.coroutine(lambda: {"action": "test_action", "parameters": {}, "confidence": 0.8})(),
                 # Reflection
-                {"reflection": "success", "success": True}
+                asyncio.coroutine(lambda: {"reflection": "success", "success": True})()
             ]
             
             result, chain = await agent.process({"test": "input"})

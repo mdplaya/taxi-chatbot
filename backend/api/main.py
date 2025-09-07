@@ -54,15 +54,24 @@ app = FastAPI(title="TAXI Chatbot API")
 # Simple field normalization mapping
 FIELD_NORMALIZATION = {
     "appEnvironment": {
-        "PROD": "PROD",
-        "PRODUCTION": "PROD",
-        "NONPROD": "NONPROD",
-        "NON-PROD": "NONPROD",
-        "DEV": "NONPROD",
-        "TEST": "NONPROD",
-        "QA": "NONPROD",
-        "DEVELOPMENT": "NONPROD",
-        "TESTING": "NONPROD"
+        # Lowercase keys for robust normalization
+        "production": "PROD",
+        "prod": "PROD",
+        "nonprod": "NONPROD",
+        "non-prod": "NONPROD",
+        "development": "NONPROD",
+        "dev": "NONPROD",
+        "test": "NONPROD",
+        "testing": "NONPROD",
+        "qa": "NONPROD",
+        "staging": "NONPROD",
+        "stage": "NONPROD",
+        "perf": "NONPROD",
+        "performance": "NONPROD",
+        "load": "NONPROD",
+        "sit": "NONPROD",
+        "uat": "NONPROD",
+        "preprod": "NONPROD"
     },
     "appEnvironmentSubtype": {
         "dev": "dev",

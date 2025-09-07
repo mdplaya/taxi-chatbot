@@ -76,6 +76,9 @@ class OrchestratorAgent(BaseAgent):
     async def prepare_context(self, input_data: Any) -> Dict[str, Any]:
         """Prepare context for routing decision"""
         if isinstance(input_data, dict):
+            # Handle 'message' key from API and normalize to 'user_input'
+            if "message" in input_data and "user_input" not in input_data:
+                input_data["user_input"] = input_data["message"]
             return input_data
         return {"user_input": str(input_data)}
     
@@ -156,7 +159,7 @@ class OrchestratorAgent(BaseAgent):
         # Try fast path detection first
         fast_path_result = self._check_fast_path(processed_input, session_id)
         if fast_path_result:
-            logger.info(f"[Orchestrator] Fast path detected: {fast_path_result['intent']}")
+            logger.info(f"[Orchestrator] Fast path detected: {fast_path_result['action']['type']}")
             # Cache and return
             self._cache_result(cache_key, fast_path_result)
             return fast_path_result
@@ -219,7 +222,7 @@ class OrchestratorAgent(BaseAgent):
                 logger.error("[Orchestrator] LLM reasoning returned empty result")
                 return self._build_routing_response(
                     "clarification",
-                    {"original_request": user_input},
+                    {"original_request": user_input, "raw_request": user_input},
                     "Could not understand request",
                     0.3
                 )
@@ -230,16 +233,30 @@ class OrchestratorAgent(BaseAgent):
                 result["confidence"] = max(result.get("confidence", 0.5), 0.8)
                 result["reasoning"] = "Corrected: VM keywords detected - routing to compute agent"
             
-            # Build routing response
+            # Build routing response with environment if detected
+            context = {
+                "original_request": user_input,
+                "raw_request": user_input,  # Compute agent expects 'raw_request'
+                "resource_type": result.get("resource_type"),
+                "cloud_provider": result.get("cloud_provider"),
+                "requirements": result.get("requirements", []),
+                "business_metadata": result.get("business_metadata", {})
+            }
+            
+            # Add environment if detected
+            environment = self._extract_environment(user_input)
+            if environment:
+                normalized_env = self._normalize_environment(environment)
+                context["extracted_requirements"] = {
+                    "environment": normalized_env,
+                    "environment_confidence": 0.9,
+                    "environment_source": "orchestrator"
+                }
+                logger.info(f"[Orchestrator] Environment detected in LLM path: {normalized_env}")
+            
             return self._build_routing_response(
                 result.get("next_agent", "clarification"),
-                {
-                    "original_request": user_input,
-                    "resource_type": result.get("resource_type"),
-                    "cloud_provider": result.get("cloud_provider"),
-                    "requirements": result.get("requirements", []),
-                    "business_metadata": result.get("business_metadata", {})
-                },
+                context,
                 result.get("reasoning", ""),
                 result.get("confidence", 0.5)
             )
@@ -248,13 +265,41 @@ class OrchestratorAgent(BaseAgent):
             logger.error(f"[Orchestrator] Direct reasoning failed: {e}")
             return self._build_routing_response(
                 "clarification",
-                {"original_request": user_input, "error": str(e)},
+                {"original_request": user_input, "raw_request": user_input, "error": str(e)},
                 "Error processing request",
                 0.1
             )
     
     def _build_routing_response(self, agent_name: str, context: Dict, reasoning: str, confidence: float) -> Dict[str, Any]:
         """Build standardized routing response"""
+        # Extract environment and add to context if not already present
+        if "extracted_requirements" not in context:
+            context["extracted_requirements"] = {}
+        
+        # For appEnvironment/appEnvironmentSubtype: NON-deterministic.
+        # Detect candidate labels only; never set final values here.
+        user_input = context.get("original_request", "")
+        candidates = self._detect_environment_candidates(user_input)
+        if candidates:
+            context["extracted_requirements"]["environment_ambiguous"] = True
+            context["extracted_requirements"]["environment_candidates"] = candidates
+
+        # Deterministic extraction for LoB, costCenter, id (email)
+        context.setdefault("business_metadata", {})
+        src = user_input
+        lob = self._extract_line_of_business(src)
+        if lob:
+            context["business_metadata"]["lineOfBusiness"] = lob
+            context["extracted_requirements"]["lineOfBusiness"] = lob
+        cc = self._extract_cost_center(src)
+        if cc:
+            context["business_metadata"]["costCenter"] = cc
+            context["extracted_requirements"]["costCenter"] = cc
+        email = self._extract_id(src)
+        if email:
+            context["business_metadata"]["id"] = email
+            context["extracted_requirements"]["id"] = email
+
         return {
             "action": {
                 "type": f"route_to_{agent_name}",
@@ -288,6 +333,7 @@ class OrchestratorAgent(BaseAgent):
                 "compute",
                 {
                     "original_request": user_input,
+                    "raw_request": user_input,  # Compute agent expects 'raw_request'
                     "resource_type": "compute",
                     "cloud_provider": cloud_provider
                 },
@@ -303,6 +349,7 @@ class OrchestratorAgent(BaseAgent):
                 "database",
                 {
                     "original_request": user_input,
+                    "raw_request": user_input,  # For consistency across agents
                     "resource_type": "database"
                 },
                 "Database keywords detected - fast routing to database agent",
@@ -328,6 +375,77 @@ class OrchestratorAgent(BaseAgent):
                 return env
         
         return None
+    
+    def _normalize_environment(self, env: Optional[str]) -> Optional[str]:
+        """Normalize environment value to PROD/NONPROD"""
+        if not env:
+            return None
+        
+        env_mapping = {
+            "production": "PROD",
+            "development": "NONPROD",
+            "test": "NONPROD",
+            "staging": "NONPROD",
+            "qa": "NONPROD"
+        }
+        
+        return env_mapping.get(env, env.upper())
+
+    def _detect_environment_candidates(self, text: str) -> list:
+        """Detect environment-related labels only; do not set values.
+        Returns normalized tokens like: prod, dev, qa, test, staging, perf, sit, uat, preprod, production.
+        """
+        s = (text or "").lower()
+        labels = []
+        mapping = {
+            "production": ["production", "prod"],
+            "dev": ["development", "dev"],
+            "qa": ["quality", "qa"],
+            "test": ["test", "testing", "preprod"],
+            "sit": ["sit"],
+            "uat": ["uat"],
+            "staging": ["staging", "stage"],
+            "perf": ["perf", "performance", "load"],
+        }
+        # Emit normalized tokens for each match; include 'prod' shorthand for production
+        for norm, keys in mapping.items():
+            if any(k in s for k in keys):
+                if norm == "production":
+                    # Include both 'production' and 'prod' as candidates for clarity
+                    labels.extend(["production", "prod"])
+                else:
+                    labels.append(norm)
+        # De-duplicate while preserving order
+        seen = set()
+        unique = []
+        for x in labels:
+            if x not in seen:
+                seen.add(x)
+                unique.append(x)
+        return unique
+
+    def _extract_line_of_business(self, text: str) -> Optional[str]:
+        s = (text or "").lower()
+        if "retail" in s:
+            return "RETAIL"
+        if "ists" in s:
+            return "ISTS"
+        if "edml" in s:
+            return "EDML"
+        return None
+
+    def _extract_cost_center(self, text: str) -> Optional[str]:
+        import re
+        m = re.search(r"(^|\D)(\d{5})(\D|$)", text or "")
+        return m.group(2) if m else None
+
+    def _extract_id(self, text: str) -> Optional[str]:
+        import re
+        m = re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text or "")
+        if not m:
+            return None
+        # Deterministic extraction; validation occurs later during VMRequest construction
+        return m.group(0)
     
     def _should_skip_correction(self, user_input: str) -> bool:
         """Check if we should skip error correction for simple requests"""

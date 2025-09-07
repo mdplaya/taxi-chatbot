@@ -5,6 +5,7 @@ Basic field validation and normalization
 
 from typing import Dict, Any, Optional, Tuple
 from dataclasses import dataclass
+from datetime import datetime
 import logging
 
 logger = logging.getLogger(__name__)
@@ -19,6 +20,11 @@ class CorrectionResult:
     confidence: float
     reasoning: str
     requires_confirmation: bool = False
+    
+    @property
+    def corrected(self):
+        """Alias for backward compatibility"""
+        return self.corrected_text
 
 
 class ErrorCorrectionSystem:
@@ -28,6 +34,8 @@ class ErrorCorrectionSystem:
     
     def __init__(self, model: str = "gpt-5-mini"):
         self.model = model
+        self.learning_cache = {}  # Session-based learning storage
+        self.max_cache_size = 100  # Prevent memory leak
     
     async def correct(self, text: str, context: Dict[str, Any] = None) -> CorrectionResult:
         """
@@ -77,6 +85,39 @@ class ErrorCorrectionSystem:
             reasoning="; ".join(corrections_made) if corrections_made else "No corrections needed",
             requires_confirmation=False
         )
+    
+    async def detect_and_correct(self, text: str, context: Dict[str, Any] = None) -> CorrectionResult:
+        """
+        Detect errors and correct them
+        Currently wraps correct() but can be enhanced with detection logic
+        """
+        # Future: Add detection logic here to identify if correction is needed
+        return await self.correct(text, context)
+    
+    async def learn_from_feedback(self, original: str, corrected: str, success: bool, error: str = None):
+        """
+        Learn from correction feedback for future improvements
+        Stores learning with size limit to prevent memory issues
+        """
+        # Create learning key
+        key = f"{original}:{corrected}"
+        
+        # Store learning data
+        self.learning_cache[key] = {
+            "success": success,
+            "error": error,
+            "timestamp": datetime.now().isoformat() if 'datetime' in globals() else None
+        }
+        
+        # Enforce cache size limit (LRU-style)
+        if len(self.learning_cache) > self.max_cache_size:
+            # Remove oldest entries
+            keys_to_remove = list(self.learning_cache.keys())[:-self.max_cache_size]
+            for k in keys_to_remove:
+                del self.learning_cache[k]
+        
+        # Log learning event (without sensitive data)
+        logger.info(f"[Learning] Feedback recorded: success={success}, cache_size={len(self.learning_cache)}")
 
 
 def validate_field(field_name: str, value: Any) -> Tuple[bool, str]:
