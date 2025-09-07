@@ -441,11 +441,17 @@ class OrchestratorAgent(BaseAgent):
 
     def _extract_id(self, text: str) -> Optional[str]:
         import re
+        from pydantic import EmailStr
         m = re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text or "")
         if not m:
             return None
-        # Deterministic extraction; validation occurs later during VMRequest construction
-        return m.group(0)
+        candidate = m.group(0)
+        try:
+            EmailStr(candidate)
+            return candidate
+        except Exception:
+            # Fallback: keep deterministic extraction even if strict validation fails
+            return candidate
     
     def _should_skip_correction(self, user_input: str) -> bool:
         """Check if we should skip error correction for simple requests"""

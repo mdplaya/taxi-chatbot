@@ -16,6 +16,12 @@ def run_async(coro):
 def extracted(text: str) -> dict:
     agent = OrchestratorAgent()
     res = run_async(agent.process(text))
+    if not isinstance(res, dict):
+        return {}
+    action = res.get('action') or {}
+    params = action.get('parameters') or {}
+    if 'extracted_requirements' in params:
+        return params.get('extracted_requirements', {})
     return res.get('context', {}).get('extracted_requirements', {})
 
 class TestRHELVariations:
@@ -111,7 +117,9 @@ class TestCompleteScenarios:
         assert result.get('os') == 'WINDOWS_22'
         assert result.get('zone') == 'us-east4-a'
         assert result.get('lineOfBusiness') == 'RETAIL'
-        assert result.get('environment') == 'PROD'
+        assert 'environment' not in result
+        cands = set(result.get('environment_candidates') or [])
+        assert 'prod' in cands or 'production' in cands
         assert result.get('use_type') == 'app'
     
     def test_dev_database_scenario(self):
@@ -121,7 +129,9 @@ class TestCompleteScenarios:
         )
         assert result.get('os') == 'LINUX_RHEL8'
         assert result.get('use_type') == 'database'
-        assert result.get('environment') == 'NONPROD'
+        assert 'environment' not in result
+        cands = set(result.get('environment_candidates') or [])
+        assert 'dev' in cands
         assert result.get('lineOfBusiness') == 'ISTS'
     
     def test_minimal_request(self):
@@ -130,7 +140,7 @@ class TestCompleteScenarios:
         assert 'machine_type' not in result
         # Should not have other fields
         assert result.get('os') is None
-        assert result.get('environment') is None
+        assert 'environment' not in result
     
     def test_complex_request(self):
         """Test complex request with multiple requirements"""
@@ -142,8 +152,9 @@ class TestCompleteScenarios:
         assert 'machine_type' not in result or isinstance(result.get('machine_type'), str)
         assert result.get('os') == 'LINUX_RHEL8'
         assert result.get('use_type') == 'app'
-        assert result.get('environment') == 'NONPROD'
-        assert result.get('appEnvironmentSubtype') == 'qa'
+        assert 'environment' not in result
+        cands = set(result.get('environment_candidates') or [])
+        assert 'qa' in cands
         assert result.get('zone') == 'us-central1-a'
         assert result.get('lineOfBusiness') == 'EDML'
 
@@ -174,8 +185,9 @@ class TestEnvironmentDetection:
     def test_prod_no_subtype(self):
         """Test that PROD environment has no subtype"""
         result = extracted("Production server needed")
-        assert result.get('environment') == 'PROD'
-        assert result.get('appEnvironmentSubtype') is None or 'appEnvironmentSubtype' not in result
+        assert 'environment' not in result
+        cands = set(result.get('environment_candidates') or [])
+        assert 'prod' in cands or 'production' in cands
 
 
 if __name__ == "__main__":

@@ -341,12 +341,84 @@ class ClarificationAgent(BaseAgent):
             logger.error(f"Error generating questions: {e}")
             questions = []
 
-        # Optional deterministic fallback disabled by default. To enable, set env CLARIFICATION_DETERMINISTIC_FALLBACKS=true
-        if not questions and new_fields and os.getenv('CLARIFICATION_DETERMINISTIC_FALLBACKS', 'false').lower() == 'true':
-            fallback_map = {}
+        # Minimal offline fallback: if LLM unavailable or returned no questions, generate basic questions
+        if not questions and new_fields:
+            fallback_map = {
+                "lineOfBusiness": {
+                    "field": "lineOfBusiness",
+                    "question": "What is your line of business? (RETAIL, ISTS, or EDML)",
+                    "suggestions": ["RETAIL", "ISTS", "EDML"],
+                    "why_needed": "We tag requests appropriately",
+                    "allows_custom": False,
+                },
+                "id": {
+                    "field": "id",
+                    "question": "What is your email address?",
+                    "suggestions": [],
+                    "why_needed": "We need a requestor for the ticket",
+                    "allows_custom": True,
+                },
+                "appEnvironment": {
+                    "field": "appEnvironment",
+                    "question": "Is this for PROD or NONPROD?",
+                    "suggestions": ["PROD", "NONPROD"],
+                    "why_needed": "Environment affects policy and routing",
+                    "allows_custom": False,
+                },
+                "appEnvironmentSubtype": {
+                    "field": "appEnvironmentSubtype",
+                    "question": "If NONPROD, which subtype? (dev, qa, test, perf)",
+                    "suggestions": ["dev", "qa", "test", "perf"],
+                    "why_needed": "Subtype provides more context for NONPROD",
+                    "allows_custom": False,
+                },
+                "costCenter": {
+                    "field": "costCenter",
+                    "question": "What is the 5-digit cost center?",
+                    "suggestions": [],
+                    "why_needed": "Billing requires a cost center",
+                    "allows_custom": True,
+                },
+                "useType": {
+                    "field": "useType",
+                    "question": "Is this for an app or a database?",
+                    "suggestions": ["app", "database"],
+                    "why_needed": "We size differently for apps vs databases",
+                    "allows_custom": False,
+                },
+                "os": {
+                    "field": "os",
+                    "question": "Which OS do you prefer? (LINUX_RHEL8, LINUX_RHEL9, WINDOWS_19, WINDOWS_22)",
+                    "suggestions": ["LINUX_RHEL8", "LINUX_RHEL9", "WINDOWS_19", "WINDOWS_22"],
+                    "why_needed": "We need the image to provision",
+                    "allows_custom": False,
+                },
+                "project": {
+                    "field": "project",
+                    "question": "Which GCP project should we use?",
+                    "suggestions": [],
+                    "why_needed": "Resources are provisioned in a project",
+                    "allows_custom": True,
+                },
+                "zone": {
+                    "field": "zone",
+                    "question": "Which GCP zone should we use (e.g., us-east4-a)?",
+                    "suggestions": [],
+                    "why_needed": "Provisioning requires a GCP zone",
+                    "allows_custom": True,
+                },
+                "machineType": {
+                    "field": "machineType",
+                    "question": "Which GCP machine type do you prefer (e.g., e2-small, n1-standard-1)?",
+                    "suggestions": [],
+                    "why_needed": "We need sizing to create the VM",
+                    "allows_custom": True,
+                },
+            }
             for f in new_fields:
-                if f in fallback_map:
-                    questions.append(fallback_map[f])
+                q = fallback_map.get(f)
+                if q:
+                    questions.append(q)
         
         # Convert questions to simple format for API compatibility
         simplified_questions = []

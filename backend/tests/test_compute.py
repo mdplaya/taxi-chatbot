@@ -20,16 +20,28 @@ def extract_with_orchestrator(text: str) -> dict:
 class TestExtractionViaOrchestrator:
     def _extracted(self, text: str) -> dict:
         res = extract_with_orchestrator(text)
-        return res.get('context', {}).get('extracted_requirements', {}) if isinstance(res, dict) else {}
+        if not isinstance(res, dict):
+            return {}
+        # Prefer action.parameters.extracted_requirements if present
+        action = res.get('action') or {}
+        params = action.get('parameters') or {}
+        if 'extracted_requirements' in params:
+            return params.get('extracted_requirements', {})
+        # Fallback to top-level context for older structures
+        return res.get('context', {}).get('extracted_requirements', {})
 
     def test_development_environment(self):
         extracted = self._extracted("I need a VM for development")
-        assert extracted.get('environment') == 'NONPROD'
-        assert extracted.get('appEnvironmentSubtype') == 'dev'
+        assert 'environment' not in extracted
+        assert extracted.get('environment_ambiguous') is True
+        assert 'dev' in set(extracted.get('environment_candidates') or [])
 
     def test_production_environment(self):
         extracted = self._extracted("Deploy a production server")
-        assert extracted.get('environment') == 'PROD'
+        assert 'environment' not in extracted
+        assert extracted.get('environment_ambiguous') is True
+        cands = set(extracted.get('environment_candidates') or [])
+        assert ('prod' in cands) or ('production' in cands)
 
     def test_windows_22_detection(self):
         extracted = self._extracted("Create a Windows 2022 VM")
@@ -87,21 +99,27 @@ class TestExtractionViaOrchestrator:
         assert extracted.get('zone') == 'us-east4-a'
         assert extracted.get('lineOfBusiness') == 'RETAIL'
         assert extracted.get('use_type') == 'app'
-        assert extracted.get('environment') == 'PROD'
+        assert 'environment' not in extracted
+        cands = set(extracted.get('environment_candidates') or [])
+        assert ('prod' in cands) or ('production' in cands)
 
     def test_partial_requirements(self):
         extracted = self._extracted("I need a Linux server")
         assert extracted.get('os') == 'LINUX_RHEL9'  # Default Linux
-        # No environment or zone guaranteed from this input
-        assert 'environment' not in extracted or extracted.get('environment') in ['PROD', 'NONPROD']
+        # No environment guaranteed from this input
+        assert 'environment' not in extracted
         assert 'zone' not in extracted or isinstance(extracted.get('zone'), str)
 
     def test_staging_is_nonprod(self):
         extracted = self._extracted("Deploy to staging environment")
-        assert extracted.get('environment') == 'NONPROD'
+        assert 'environment' not in extracted
+        cands = set(extracted.get('environment_candidates') or [])
+        assert 'staging' in cands
 
     def test_case_insensitive_detection(self):
         extracted = self._extracted("DEPLOY A WINDOWS VM FOR RETAIL IN PROD")
         assert extracted.get('os') == 'WINDOWS_22'
         assert extracted.get('lineOfBusiness') == 'RETAIL'
-        assert extracted.get('environment') == 'PROD'
+        assert 'environment' not in extracted
+        cands = set(extracted.get('environment_candidates') or [])
+        assert 'prod' in cands or 'production' in cands
