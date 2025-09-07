@@ -29,7 +29,7 @@ services:
     volumes:
       - ./backend:/app
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8001/health', timeout=5).getcode()==200 else 1)\""]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -57,7 +57,7 @@ services:
       - AGENT_REASONING_MODEL=gpt-5-mini
       - REASONING_TEMPERATURE=1.0
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health', timeout=5).getcode()==200 else 1)\""]
       interval: 30s
       timeout: 10s
       retries: 3
