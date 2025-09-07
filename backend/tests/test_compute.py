@@ -5,6 +5,7 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from agents.orchestrator import OrchestratorAgent
+from agents.gce_specialist import GCESpecialistAgent
 import asyncio
 
 
@@ -44,40 +45,146 @@ class TestExtractionViaOrchestrator:
         assert ('prod' in cands) or ('production' in cands)
 
     def test_windows_22_detection(self):
-        extracted = self._extracted("Create a Windows 2022 VM")
-        assert extracted.get('os') == 'WINDOWS_22'
+        # Refactor: validate GCE uses provided technical fields
+        ctx = {
+            'raw_request': 'Create a Windows 2022 VM',
+            'extracted_requirements': {
+                'os': 'WINDOWS_22',
+                'machineType': 'e2-small',
+                'zone': 'us-east4-a',
+                'project': 'proja-12345'
+            },
+            'business_metadata': {}
+        }
+        gce = GCESpecialistAgent()
+        res = run_async(gce.create_instance(ctx))
+        assert res.get('success') is True
+        payload = res.get('payload_sent') or {}
+        assert payload.get('os') == 'WINDOWS_22'
 
     def test_windows_19_detection(self):
-        extracted = self._extracted("Need a Windows 2019 server")
-        assert extracted.get('os') == 'WINDOWS_19'
+        ctx = {
+            'raw_request': 'Need a Windows 2019 server',
+            'extracted_requirements': {
+                'os': 'WINDOWS_19',
+                'machineType': 'n1-standard-1',
+                'zone': 'us-east4-a',
+                'project': 'proja-12345'
+            },
+            'business_metadata': {}
+        }
+        gce = GCESpecialistAgent()
+        res = run_async(gce.create_instance(ctx))
+        assert res.get('success') is True
+        assert res.get('payload_sent', {}).get('os') == 'WINDOWS_19'
 
     def test_linux_rhel8_detection(self):
-        extracted = self._extracted("Set up a Linux RHEL8 instance")
-        assert extracted.get('os') == 'LINUX_RHEL8'
+        ctx = {
+            'raw_request': 'Set up a Linux RHEL8 instance',
+            'extracted_requirements': {
+                'os': 'LINUX_RHEL8',
+                'machineType': 'n1-standard-1',
+                'zone': 'us-east4-a',
+                'project': 'proja-12345'
+            },
+            'business_metadata': {}
+        }
+        res = run_async(GCESpecialistAgent().create_instance(ctx))
+        assert res.get('success') is True
+        assert res.get('payload_sent', {}).get('os') == 'LINUX_RHEL8'
 
     def test_linux_rhel9_detection(self):
-        extracted = self._extracted("Deploy RHEL 9 server")
-        assert extracted.get('os') == 'LINUX_RHEL9'
+        ctx = {
+            'raw_request': 'Deploy RHEL 9 server',
+            'extracted_requirements': {
+                'os': 'LINUX_RHEL9',
+                'machineType': 'n1-standard-1',
+                'zone': 'us-east4-a',
+                'project': 'proja-12345'
+            },
+            'business_metadata': {}
+        }
+        res = run_async(GCESpecialistAgent().create_instance(ctx))
+        assert res.get('success') is True
+        assert res.get('payload_sent', {}).get('os') == 'LINUX_RHEL9'
 
     def test_database_use_type(self):
-        extracted = self._extracted("VM for our database server")
-        assert extracted.get('use_type') == 'database'
+        # Resource field asserted downstream in GCE payload when provided
+        ctx = {
+            'raw_request': 'VM for our database server',
+            'extracted_requirements': {
+                'useType': 'database',
+                'os': 'LINUX_RHEL9',
+                'machineType': 'n1-standard-1',
+                'zone': 'us-east4-a',
+                'project': 'proja-12345'
+            },
+            'business_metadata': {}
+        }
+        res = run_async(GCESpecialistAgent().create_instance(ctx))
+        assert res.get('success') is True
+        assert res.get('payload_sent', {}).get('useType') == 'database'
 
     def test_app_use_type(self):
-        extracted = self._extracted("Server for our web application")
-        assert extracted.get('use_type') == 'app'
+        ctx = {
+            'raw_request': 'Server for our web application',
+            'extracted_requirements': {
+                'useType': 'app',
+                'os': 'LINUX_RHEL9',
+                'machineType': 'n1-standard-1',
+                'zone': 'us-east4-a',
+                'project': 'proja-12345'
+            },
+            'business_metadata': {}
+        }
+        res = run_async(GCESpecialistAgent().create_instance(ctx))
+        assert res.get('success') is True
+        assert res.get('payload_sent', {}).get('useType') == 'app'
 
     def test_machine_type_n1_standard(self):
-        extracted = self._extracted("Create VM with n1-standard-2 machine type")
-        assert extracted.get('machine_type') == 'n1-standard-2'
+        ctx = {
+            'raw_request': 'Create VM with n1-standard-2 machine type',
+            'extracted_requirements': {
+                'machineType': 'n1-standard-2',
+                'zone': 'us-east4-a',
+                'os': 'LINUX_RHEL9',
+                'project': 'proja-12345'
+            },
+            'business_metadata': {}
+        }
+        res = run_async(GCESpecialistAgent().create_instance(ctx))
+        assert res.get('success') is True
+        assert res.get('payload_sent', {}).get('machineType') == 'n1-standard-2'
 
     def test_machine_type_n2_standard(self):
-        extracted = self._extracted("Need n2-standard-4 instance")
-        assert extracted.get('machine_type') == 'n2-standard-4'
+        ctx = {
+            'raw_request': 'Need n2-standard-4 instance',
+            'extracted_requirements': {
+                'machineType': 'n2-standard-4',
+                'zone': 'us-east4-a',
+                'os': 'LINUX_RHEL9',
+                'project': 'proja-12345'
+            },
+            'business_metadata': {}
+        }
+        res = run_async(GCESpecialistAgent().create_instance(ctx))
+        assert res.get('success') is True
+        assert res.get('payload_sent', {}).get('machineType') == 'n2-standard-4'
 
     def test_zone_detection(self):
-        extracted = self._extracted("Deploy VM in us-east4-a zone")
-        assert extracted.get('zone') == 'us-east4-a'
+        ctx = {
+            'raw_request': 'Deploy VM in us-east4-a zone',
+            'extracted_requirements': {
+                'zone': 'us-east4-a',
+                'machineType': 'n1-standard-1',
+                'os': 'LINUX_RHEL9',
+                'project': 'proja-12345'
+            },
+            'business_metadata': {}
+        }
+        res = run_async(GCESpecialistAgent().create_instance(ctx))
+        assert res.get('success') is True
+        assert res.get('payload_sent', {}).get('zone') == 'us-east4-a'
 
     def test_retail_line_of_business(self):
         extracted = self._extracted("VM for retail application")
@@ -92,21 +199,30 @@ class TestExtractionViaOrchestrator:
         assert extracted.get('lineOfBusiness') == 'EDML'
 
     def test_complex_request(self):
-        extracted = self._extracted(
-            "Deploy a Windows 2022 VM in us-east4-a for retail app in production"
-        )
-        assert extracted.get('os') == 'WINDOWS_22'
-        assert extracted.get('zone') == 'us-east4-a'
-        assert extracted.get('lineOfBusiness') == 'RETAIL'
-        assert extracted.get('use_type') == 'app'
-        assert 'environment' not in extracted
-        cands = set(extracted.get('environment_candidates') or [])
-        assert ('prod' in cands) or ('production' in cands)
+        # Orchestrator supplies business; technical fields validated by GCE
+        ctx = {
+            'raw_request': 'Deploy a Windows 2022 VM in us-east4-a for retail app in production',
+            'extracted_requirements': {
+                'os': 'WINDOWS_22',
+                'useType': 'app',
+                'zone': 'us-east4-a',
+                'machineType': 'e2-small',
+                'project': 'proja-12345',
+                'lineOfBusiness': 'RETAIL'
+            },
+            'business_metadata': {'lineOfBusiness': 'RETAIL'}
+        }
+        res = run_async(GCESpecialistAgent().create_instance(ctx))
+        assert res.get('success') is True
+        payload = res.get('payload_sent', {})
+        assert payload.get('os') == 'WINDOWS_22'
+        assert payload.get('zone') == 'us-east4-a'
+        assert payload.get('machineType') == 'e2-small'
 
     def test_partial_requirements(self):
         extracted = self._extracted("I need a Linux server")
-        assert extracted.get('os') == 'LINUX_RHEL9'  # Default Linux
-        # No environment guaranteed from this input
+        # Orchestrator no longer extracts OS; ensure it didn't guess
+        assert 'os' not in extracted or extracted.get('os') is None
         assert 'environment' not in extracted
         assert 'zone' not in extracted or isinstance(extracted.get('zone'), str)
 
@@ -118,7 +234,7 @@ class TestExtractionViaOrchestrator:
 
     def test_case_insensitive_detection(self):
         extracted = self._extracted("DEPLOY A WINDOWS VM FOR RETAIL IN PROD")
-        assert extracted.get('os') == 'WINDOWS_22'
+        # Orchestrator handles LoB and env candidates only
         assert extracted.get('lineOfBusiness') == 'RETAIL'
         assert 'environment' not in extracted
         cands = set(extracted.get('environment_candidates') or [])
