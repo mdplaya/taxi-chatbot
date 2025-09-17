@@ -12,6 +12,7 @@ from backend.api.main import app
 from api.schemas import ChatResponse
 from backend.utils.config import VoiceSettings, get_voice_settings
 from backend.utils.voice import ElevenLabsVoiceClient
+import backend.api.voice as voice_module
 
 
 def _activate_voice_env(monkeypatch):
@@ -247,6 +248,50 @@ def test_voice_respond_generates_tts(monkeypatch):
     assert payload["audio_base64"] == encoded
     assert payload["content_type"] == "audio/mpeg"
 
+    assert payload["chat"]["response"] == "Hello world"
+
+
+def test_voice_respond_handles_quota_exceeded(monkeypatch):
+    _activate_voice_env(monkeypatch)
+
+    async def fake_run_chat_pipeline(**kwargs):
+        return ChatResponse(
+            response="Hello world",
+            needs_clarification=False,
+            questions=None,
+            session_id="session-1",
+            final_payload=None,
+            status="ok",
+            mode="online",
+        )
+
+    monkeypatch.setattr("backend.api.voice.run_chat_pipeline", fake_run_chat_pipeline)
+    monkeypatch.setattr("api.voice.run_chat_pipeline", fake_run_chat_pipeline)
+
+    quota_error = voice_module.VoiceQuotaExceeded("quota exceeded")
+
+    class QuotaClient:
+        async def synthesize_speech(self, *args, **kwargs):
+            raise quota_error
+
+    monkeypatch.setattr("backend.api.voice.VoiceQuotaExceeded", voice_module.VoiceQuotaExceeded)
+    monkeypatch.setattr("api.voice.VoiceQuotaExceeded", voice_module.VoiceQuotaExceeded)
+
+    monkeypatch.setattr("backend.api.voice.ElevenLabsVoiceClient", lambda settings: QuotaClient())
+    monkeypatch.setattr("api.voice.ElevenLabsVoiceClient", lambda settings: QuotaClient())
+
+    response = client.post(
+        "/voice/respond",
+        json={
+            "session_id": "session-1",
+            "text": "Hello world",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["audio_base64"] == ""
+    assert payload["content_type"] == "audio/mpeg"
     assert payload["chat"]["response"] == "Hello world"
 
 

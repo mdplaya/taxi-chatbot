@@ -27,6 +27,10 @@ class TranscriptChunk(Dict[str, Any]):
     is_final: bool
 
 
+class VoiceQuotaExceeded(RuntimeError):
+    """Raised when ElevenLabs reports quota exhaustion."""
+
+
 def _ws_endpoint_from_http(endpoint: str) -> str:
     base = endpoint.rstrip("/")
     if base.startswith("https://"):
@@ -309,11 +313,24 @@ class ElevenLabsVoiceClient:
                 if key in voice_options:
                     kwargs[key] = voice_options[key]
 
-        stream = sdk.text_to_speech.convert(
-            self.settings.voice_id,
-            text=text,
-            **kwargs,
-        )
+        try:
+            stream = sdk.text_to_speech.convert(
+                self.settings.voice_id,
+                text=text,
+                **kwargs,
+            )
+        except ApiError as exc:
+            detail: Any = getattr(exc, "body", {})
+            status = None
+            message = None
+            if isinstance(detail, dict):
+                payload = detail.get("detail") or detail
+                if isinstance(payload, dict):
+                    status = payload.get("status")
+                    message = payload.get("message") or payload.get("detail")
+            if status == "quota_exceeded":
+                raise VoiceQuotaExceeded(message or "ElevenLabs quota exceeded") from exc
+            raise
 
         chunks: List[bytes] = []
         async for chunk in stream:
