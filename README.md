@@ -58,6 +58,21 @@ python mcp_server/server.py
 uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
+#### Voice Mode Configuration (ElevenLabs)
+1. Create an ElevenLabs API key and choose the streaming STT model, TTS model, and voice ID you plan to use.
+2. Update both `.env` (project root) and `backend/.env` with the following entries:
+   - `ELEVENLABS_API_KEY`
+   - `ELEVENLABS_STT_MODEL`
+   - `ELEVENLABS_TTS_MODEL`
+   - `ELEVENLABS_VOICE_ID`
+   - (Optional) `ELEVENLABS_API_ENDPOINT` if you need a regional endpoint override.
+3. Install the ElevenLabs SDK locally (`pip install elevenlabs`) or rebuild the Docker image to pull the dependency automatically.
+4. When running via Docker, these variables automatically pass through to the API container (`docker-compose.yml`).
+5. Start the backend API normally; the `/voice/session`, `/voice/stream`, and `/voice/respond` endpoints will proxy ElevenLabs while reusing the existing agent orchestration. Streaming transcription now uses the ElevenLabs WebSocket API with a REST fallback so short-lived outages keep the feature usable.
+6. In the web UI, toggle **Voice Mode** under the provider chips, grant microphone permissions, and use **Start recording** to capture audio. The assistant synchronizes transcripts with chat history and replies using ElevenLabs TTS.
+
+> 🔒 Voice credentials stay in environment variables only; the server never logs or returns secret values.
+
 #### Frontend Setup
 ```bash
 # 7. In a new terminal, navigate to frontend

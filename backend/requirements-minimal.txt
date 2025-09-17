@@ -13,3 +13,4 @@ openai
 tenacity
 sse-starlette
 valkey==6.1.1
+elevenlabs
