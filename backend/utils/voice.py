@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Union
+from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Tuple, Union
 
 from elevenlabs.client import AsyncElevenLabs
 from elevenlabs.core import File as ElevenLabsFile
@@ -35,6 +35,17 @@ def _ws_endpoint_from_http(endpoint: str) -> str:
         return "ws://" + base[len("http://") :] + "/speech-to-text/stream"
     # already websocket-compatible (e.g. wss://)
     return base + "/speech-to-text/stream"
+
+
+def _resolve_file_metadata(audio_format: str) -> Tuple[str, str, str]:
+    fmt = (audio_format or "").strip().lower()
+    if fmt in {"pcm16", "pcm_s16le_16", "pcm", "audio/pcm"}:
+        return "pcm_s16le_16", "stream.pcm", "application/octet-stream"
+    if fmt in {"audio/wav", "wav", "audio/x-wav"}:
+        return "other", "stream.wav", "audio/wav"
+    if fmt in {"audio/mpeg", "mp3", "audio/mp3"}:
+        return "other", "stream.mp3", "audio/mpeg"
+    return "other", "stream.bin", "application/octet-stream"
 
 
 @asynccontextmanager
@@ -161,17 +172,27 @@ class ElevenLabsVoiceClient:
     ) -> AsyncIterator[AsyncIterator[TranscriptChunk]]:
         sdk = self._sdk_client()
 
-        file_payload: ElevenLabsFile = ("stream.wav", audio, "application/octet-stream")
+        file_format, filename, content_type = _resolve_file_metadata(audio_format)
+        file_payload: ElevenLabsFile = (filename, audio, content_type)
         try:
             response = await sdk.speech_to_text.convert(
                 model_id=self.settings.stt_model,
                 file=file_payload,
-                file_format="other" if audio_format != "pcm_s16le_16" else "pcm_s16le_16",
+                file_format=file_format,
             )
         except ApiError as exc:
-            raise RuntimeError(
-                f"ElevenLabs speech-to-text request failed with status {exc.status_code}"
-            ) from exc
+            detail = ""
+            body = getattr(exc, "body", None)
+            if isinstance(body, dict):
+                payload = body.get("detail")
+                if isinstance(payload, dict):
+                    detail = payload.get("message") or payload.get("status") or ""
+                elif isinstance(payload, str):
+                    detail = payload
+            message = f"ElevenLabs speech-to-text request failed with status {exc.status_code}"
+            if detail:
+                message = f"{message}: {detail}"
+            raise RuntimeError(message) from exc
 
         segments = self._normalize_rest_response(response)
 

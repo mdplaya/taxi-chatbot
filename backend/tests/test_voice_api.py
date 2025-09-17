@@ -106,10 +106,16 @@ class FakeAsyncTextToSpeech:
 
 class FakeAsyncSpeechToText:
     def __init__(self):
-        self.calls: List[Dict[str, str]] = []
+        self.calls: List[Dict[str, Any]] = []
 
     async def convert(self, *, model_id: str, file, **kwargs):  # noqa: ANN001 - match SDK signature
-        self.calls.append({"model_id": model_id})
+        self.calls.append(
+            {
+                "model_id": model_id,
+                "file": file,
+                "file_format": kwargs.get("file_format"),
+            }
+        )
         return FakeConvertResponse(text="rest fallback transcript")
 
 
@@ -322,6 +328,11 @@ def test_transcribe_stream_falls_back_to_rest(monkeypatch):
         assert chunks == [
             {"transcript": "rest fallback transcript", "is_final": True},
         ]
+        call = FakeAsyncElevenLabs.instances[-1].speech_to_text.calls[-1]
+        assert call["file_format"] == "pcm_s16le_16"
+        filename, _, content_type = call["file"]
+        assert filename.endswith(".pcm")
+        assert content_type == "application/octet-stream"
 
     asyncio.run(run())
 
@@ -361,3 +372,5 @@ def test_rest_fallback_trims_v1_suffix(monkeypatch):
     assert FakeAsyncElevenLabs.instances
     base_urls = {instance.base_url for instance in FakeAsyncElevenLabs.instances}
     assert base_urls == {"https://api.elevenlabs.io"}
+    call = FakeAsyncElevenLabs.instances[-1].speech_to_text.calls[-1]
+    assert call["file_format"] == "pcm_s16le_16"
