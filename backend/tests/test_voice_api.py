@@ -107,8 +107,11 @@ class FakeAsyncTextToSpeech:
 class FakeAsyncSpeechToText:
     def __init__(self):
         self.calls: List[Dict[str, Any]] = []
+        self.raise_error: Optional[Exception] = None
 
     async def convert(self, *, model_id: str, file, **kwargs):  # noqa: ANN001 - match SDK signature
+        if self.raise_error:
+            raise self.raise_error
         self.calls.append(
             {
                 "model_id": model_id,
@@ -374,3 +377,54 @@ def test_rest_fallback_trims_v1_suffix(monkeypatch):
     assert base_urls == {"https://api.elevenlabs.io"}
     call = FakeAsyncElevenLabs.instances[-1].speech_to_text.calls[-1]
     assert call["file_format"] == "pcm_s16le_16"
+
+
+def test_rest_fallback_handles_invalid_content(monkeypatch):
+    settings = VoiceSettings(
+        api_key="test-key",
+        stt_model="stt-model",
+        tts_model="tts-model",
+        voice_id="test-voice",
+    )
+
+    class BrokenWebSocket:
+        async def __aenter__(self):
+            raise ConnectionError("ws down")
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_connect(*args, **kwargs):
+        return BrokenWebSocket()
+
+    monkeypatch.setattr("backend.utils.voice._connect_websocket", fake_connect)
+    monkeypatch.setattr("utils.voice._connect_websocket", fake_connect)
+
+    FakeAsyncElevenLabs.instances.clear()
+
+    def fake_async_elevenlabs(*, api_key: str, base_url: Optional[str] = None):
+        instance = FakeAsyncElevenLabs(api_key=api_key, base_url=base_url)
+        from elevenlabs.core.api_error import ApiError
+
+        instance.speech_to_text.raise_error = ApiError(
+            status_code=400,
+            body={
+                "detail": {
+                    "status": "invalid_content",
+                    "message": "File corrupted",
+                }
+            },
+        )
+        return instance
+
+    monkeypatch.setattr("backend.utils.voice.AsyncElevenLabs", fake_async_elevenlabs)
+    monkeypatch.setattr("utils.voice.AsyncElevenLabs", fake_async_elevenlabs)
+
+    async def run() -> None:
+        client = ElevenLabsVoiceClient(settings)
+        async with client.transcribe_stream(audio=b"abc", audio_format="audio/webm", session_id="sess-2") as stream:
+            chunks = [chunk async for chunk in stream]
+
+        assert chunks == [{"transcript": "", "is_final": True}]
+
+    asyncio.run(run())

@@ -45,6 +45,14 @@ def _resolve_file_metadata(audio_format: str) -> Tuple[str, str, str]:
         return "other", "stream.wav", "audio/wav"
     if fmt in {"audio/mpeg", "mp3", "audio/mp3"}:
         return "other", "stream.mp3", "audio/mpeg"
+    if fmt.startswith("audio/webm") or fmt.startswith("video/webm"):
+        return "other", "stream.webm", "audio/webm"
+    if fmt.startswith("audio/ogg") or fmt.startswith("application/ogg"):
+        return "other", "stream.ogg", "audio/ogg"
+    if fmt.startswith("audio/mp4") or fmt.startswith("video/mp4"):
+        return "other", "stream.m4a", "audio/mp4"
+    if fmt and fmt.startswith("audio/"):
+        return "other", "stream.audio", fmt
     return "other", "stream.bin", "application/octet-stream"
 
 
@@ -174,6 +182,7 @@ class ElevenLabsVoiceClient:
 
         file_format, filename, content_type = _resolve_file_metadata(audio_format)
         file_payload: ElevenLabsFile = (filename, audio, content_type)
+        segments: List[TranscriptChunk]
         try:
             response = await sdk.speech_to_text.convert(
                 model_id=self.settings.stt_model,
@@ -182,19 +191,25 @@ class ElevenLabsVoiceClient:
             )
         except ApiError as exc:
             detail = ""
+            status = ""
             body = getattr(exc, "body", None)
             if isinstance(body, dict):
                 payload = body.get("detail")
                 if isinstance(payload, dict):
-                    detail = payload.get("message") or payload.get("status") or ""
+                    status = str(payload.get("status") or "")
+                    detail = payload.get("message") or status
                 elif isinstance(payload, str):
                     detail = payload
             message = f"ElevenLabs speech-to-text request failed with status {exc.status_code}"
             if detail:
                 message = f"{message}: {detail}"
-            raise RuntimeError(message) from exc
-
-        segments = self._normalize_rest_response(response)
+            if status == "invalid_content":
+                logger.warning("ElevenLabs rejected audio chunk: %s", detail or "invalid content")
+                segments = [{"transcript": "", "is_final": True}]
+            else:
+                raise RuntimeError(message) from exc
+        else:
+            segments = self._normalize_rest_response(response)
 
         async def iterator() -> AsyncIterator[TranscriptChunk]:
             for segment in segments:
