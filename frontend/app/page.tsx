@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { useVoiceSession } from './hooks/useVoiceSession'
 
 interface Message {
   id: string
@@ -10,6 +11,27 @@ interface Message {
   payload?: any
   label?: string
 }
+
+interface VoiceResponsePayload {
+  session_id: string
+  text: string
+  audio_base64: string
+  content_type: string
+  created_at: string
+  chat: {
+    response: string
+    needs_clarification: boolean
+    questions?: Array<{field: string; question: string; description: string}>
+    session_id: string
+    final_payload?: Record<string, unknown>
+    status: string
+    mode: 'online' | 'offline'
+  }
+}
+
+const BUSINESS_FIELDS = ['lineOfBusiness', 'id', 'appEnvironment', 'appEnvironmentSubtype', 'costCenter']
+const RESOURCE_FIELDS = ['useType', 'os']
+const SPECIALIST_FIELDS = ['zone', 'machineType']
 
 // Status Badge Component
 function StatusBadge({ mode }: { mode: 'online' | 'offline' | null }) {
@@ -53,20 +75,18 @@ export default function Chat() {
   const eventSourceRef = useRef<EventSource | null>(null)
   const lastGroupRef = useRef<string | null>(null)
   const pendingStatusRef = useRef<string | null>(null)
+  const lastVoiceTranscriptRef = useRef<string>('')
+  const voiceWasEnabledRef = useRef<boolean>(false)
   
   const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
   // Question group banner logic
-  const businessFields = ['lineOfBusiness', 'id', 'appEnvironment', 'appEnvironmentSubtype', 'costCenter']
-  const resourceFields = ['useType', 'os']
-  const specialistFields = ['zone', 'machineType']
-
   type GroupMeta = { key: 'business' | 'resource' | 'specialist' | 'other'; label: string; bg: string; text: string; tooltip: string }
 
-  const groupMetaFor = (qs: Array<{field: string}> | undefined): GroupMeta => {
+  const groupMetaFor = useCallback((qs: Array<{field: string}> | undefined): GroupMeta => {
     const fields = (qs || []).map(q => q.field)
-    const anyIn = (group: string[]) => fields.some(f => group.includes(f))
-    if (anyIn(businessFields)) {
+    const anyIn = (group: readonly string[]) => fields.some(f => group.includes(f))
+    if (anyIn(BUSINESS_FIELDS)) {
       return {
         key: 'business',
         label: 'Business Questions',
@@ -75,7 +95,7 @@ export default function Chat() {
         tooltip: 'Business context: line of business, requestor email, environment, and cost center.'
       }
     }
-    if (anyIn(resourceFields)) {
+    if (anyIn(RESOURCE_FIELDS)) {
       return {
         key: 'resource',
         label: 'Resource Questions',
@@ -84,7 +104,7 @@ export default function Chat() {
         tooltip: 'Resource details: how the VM will be used and the operating system.'
       }
     }
-    if (anyIn(specialistFields)) {
+    if (anyIn(SPECIALIST_FIELDS)) {
       return {
         key: 'specialist',
         label: 'Resource Specialist Questions',
@@ -94,7 +114,7 @@ export default function Chat() {
       }
     }
     return { key: 'other', label: 'Clarification', bg: 'bg-gray-100', text: 'text-gray-900', tooltip: 'Additional details to proceed.' }
-  }
+  }, [])
 
   // Get the most recent pending question (first field) if any
   const getPendingQuestion = () => {
@@ -183,6 +203,133 @@ export default function Chat() {
     setMessages(prev => prev.map(msg => msg.id === id ? { ...msg, text } : msg))
     setProgressMessage(text)
   }, [])
+
+  const handleVoiceTranscript = useCallback((text: string, isFinal: boolean) => {
+    const trimmed = (text || '').trim()
+    if (!trimmed || !isFinal) return
+    if (lastVoiceTranscriptRef.current === trimmed) return
+    lastVoiceTranscriptRef.current = trimmed
+    const userMessage: Message = {
+      id: `voice-user-${Date.now()}`,
+      type: 'user',
+      text: trimmed,
+    }
+    setMessages(prev => [...prev, userMessage])
+    setLoading(true)
+    addPendingStatus('Processing voice response...')
+  }, [addPendingStatus, setLoading, setMessages])
+
+  const handleVoiceFinalResponse = useCallback((payload: VoiceResponsePayload) => {
+    if (!payload || !payload.chat) {
+      clearPendingStatus()
+      setLoading(false)
+      return
+    }
+
+    const chat = payload.chat
+    setSessionId(chat.session_id)
+    setSystemMode(chat.mode)
+    clearPendingStatus()
+
+    const meta = chat.needs_clarification ? groupMetaFor(chat.questions) : null
+    const newMessages: Message[] = []
+    if (meta && meta.label && lastGroupRef.current !== meta.label) {
+      newMessages.push({ id: (Date.now() + 0).toString(), type: 'divider', label: meta.label })
+      lastGroupRef.current = meta.label
+    }
+    const botMessage: Message = {
+      id: (Date.now() + 1).toString(),
+      type: chat.needs_clarification ? 'questions' : 'bot',
+      text: chat.response,
+      questions: chat.questions,
+      payload: chat.final_payload,
+    }
+    newMessages.push(botMessage)
+    setMessages(prev => [...prev, ...newMessages])
+    setAnswers({})
+    if (chat.needs_clarification && chat.questions && chat.questions.length) {
+      const q = chat.questions[0]
+      setPlaceholder(q.description || q.question || 'Type your answer...')
+    } else {
+      setPlaceholder('Ask anything')
+    }
+    lastVoiceTranscriptRef.current = ''
+    setLoading(false)
+  }, [
+    clearPendingStatus,
+    groupMetaFor,
+    setAnswers,
+    setLoading,
+    setMessages,
+    setPlaceholder,
+    setSessionId,
+    setSystemMode,
+  ])
+
+  const {
+    voiceEnabled,
+    isRecording,
+    error: voiceError,
+    transcript: voiceTranscript,
+    toggleVoice,
+    startRecording,
+    stopRecording,
+    clearError: clearVoiceError,
+    audioRef,
+  } = useVoiceSession({
+    apiUrl: API_URL,
+    sessionId,
+    onTranscript: handleVoiceTranscript,
+    onFinalResponse: handleVoiceFinalResponse,
+  })
+
+  const handleToggleVoice = useCallback(async () => {
+    clearVoiceError()
+    if (voiceEnabled) {
+      clearPendingStatus()
+      setLoading(false)
+    }
+    try {
+      await toggleVoice()
+    } catch (error) {
+      clearPendingStatus()
+      setLoading(false)
+    }
+  }, [clearPendingStatus, clearVoiceError, setLoading, toggleVoice, voiceEnabled])
+
+  const handleStartRecording = useCallback(async () => {
+    clearVoiceError()
+    addPendingStatus('Listening...')
+    setLoading(true)
+    try {
+      await startRecording()
+    } catch (error) {
+      clearPendingStatus()
+      setLoading(false)
+    }
+  }, [addPendingStatus, clearPendingStatus, clearVoiceError, setLoading, startRecording])
+
+  const handleStopRecording = useCallback(() => {
+    stopRecording()
+    if (pendingStatusRef.current) {
+      updatePendingStatus('Processing voice response...')
+    }
+  }, [stopRecording, updatePendingStatus])
+
+  useEffect(() => {
+    if (voiceError) {
+      clearPendingStatus()
+      setLoading(false)
+    }
+  }, [voiceError, clearPendingStatus])
+
+  useEffect(() => {
+    if (!voiceEnabled && voiceWasEnabledRef.current) {
+      clearPendingStatus()
+      setLoading(false)
+    }
+    voiceWasEnabledRef.current = voiceEnabled
+  }, [voiceEnabled, clearPendingStatus])
 
   const sendMessage = async () => {
     if (!input.trim()) return
@@ -549,7 +696,7 @@ export default function Chat() {
         <div className="max-w-4xl mx-auto px-4 py-4">
           <div className="flex flex-col items-center gap-2">
             <h1 className="text-xl font-semibold">TAXI Infrastructure Bot</h1>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
                 onClick={() => setProvider(prev => (prev === 'gcp' ? null : 'gcp'))}
@@ -581,7 +728,45 @@ export default function Chat() {
               >
                 OnPrem
               </button>
+              <button
+                type="button"
+                onClick={handleToggleVoice}
+                aria-pressed={voiceEnabled}
+                className={`px-3 py-1 rounded-full text-sm border transition-colors ${
+                  voiceEnabled
+                    ? 'bg-rose-600 text-white border-rose-600'
+                    : 'bg-white text-gray-800 border-gray-300 hover:bg-gray-50'
+                }`}
+                title={voiceEnabled ? 'Disable voice controls' : 'Enable voice controls'}
+              >
+                Voice Mode
+              </button>
+              {voiceEnabled && (
+                <button
+                  type="button"
+                  onClick={isRecording ? handleStopRecording : handleStartRecording}
+                  className={`px-3 py-1 rounded-full text-sm border transition-colors ${
+                    isRecording
+                      ? 'bg-red-600 text-white border-red-600'
+                      : 'bg-white text-gray-800 border-gray-300 hover:bg-gray-50'
+                  }`}
+                  disabled={!isRecording && loading}
+                  title={isRecording ? 'Stop capturing microphone audio' : 'Begin capturing microphone audio'}
+                >
+                  {isRecording ? 'Stop recording' : 'Start recording'}
+                </button>
+              )}
             </div>
+            {voiceError && (
+              <div className="w-full sm:w-[640px] rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700" role="alert">
+                {voiceError}
+              </div>
+            )}
+            {voiceEnabled && voiceTranscript && (
+              <div className="w-full sm:w-[640px] text-xs text-gray-500" data-testid="voice-transcript">
+                Transcript: {voiceTranscript}
+              </div>
+            )}
             {loading && (
               <div
                 data-testid="composer-feedback"
@@ -628,6 +813,7 @@ export default function Chat() {
             {sessionId && (
               <div className="text-[11px] text-gray-500">Session ID: {sessionId}</div>
             )}
+            <audio ref={audioRef} hidden />
           </div>
         </div>
       </div>
