@@ -1,10 +1,10 @@
 'use client'
 
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 
 interface Message {
   id: string
-  type: 'user' | 'bot' | 'questions' | 'divider'
+  type: 'user' | 'bot' | 'questions' | 'divider' | 'status'
   text?: string
   questions?: Array<{field: string; question: string; description: string}>
   payload?: any
@@ -48,9 +48,11 @@ export default function Chat() {
   const [progressPercentage, setProgressPercentage] = useState<number>(0)
   const [provider, setProvider] = useState<'gcp' | 'azure' | 'onprem' | null>(null)
   const [placeholder, setPlaceholder] = useState<string>('Ask anything')
+  const composerStatusText = progressMessage.trim() ? progressMessage : 'Processing...'
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const eventSourceRef = useRef<EventSource | null>(null)
   const lastGroupRef = useRef<string | null>(null)
+  const pendingStatusRef = useRef<string | null>(null)
   
   const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
@@ -153,6 +155,35 @@ export default function Chat() {
     return text
   }
 
+  const clearPendingStatus = useCallback(() => {
+    const id = pendingStatusRef.current
+    if (!id) {
+      setProgressMessage('')
+      setProgressPercentage(0)
+      return
+    }
+    setMessages(prev => prev.filter(msg => msg.id !== id))
+    pendingStatusRef.current = null
+    setProgressMessage('')
+    setProgressPercentage(0)
+  }, [])
+
+  const addPendingStatus = useCallback((text: string) => {
+    clearPendingStatus()
+    const id = `status-${Date.now()}`
+    pendingStatusRef.current = id
+    setMessages(prev => [...prev, { id, type: 'status', text }])
+    setProgressMessage(text)
+    setProgressPercentage(0)
+  }, [clearPendingStatus])
+
+  const updatePendingStatus = useCallback((text: string) => {
+    const id = pendingStatusRef.current
+    if (!id) return
+    setMessages(prev => prev.map(msg => msg.id === id ? { ...msg, text } : msg))
+    setProgressMessage(text)
+  }, [])
+
   const sendMessage = async () => {
     if (!input.trim()) return
 
@@ -166,19 +197,18 @@ export default function Chat() {
     setMessages(prev => [...prev, userMessage])
     setInput('')
     setLoading(true)
-    setProgressMessage('Connecting...')
-    setProgressPercentage(0)
 
-    // If there's a pending question, treat this send as an answer
     const pending = getPendingQuestion()
     if (pending) {
-      // Submit the answer payload directly to avoid stale state reads
       const payload: Record<string, string> = { [pending.field]: currentInput }
       setAnswers(payload)
+      addPendingStatus('Submitting answer...')
       await submitAnswers(payload)
       return
     }
-    
+
+    addPendingStatus('Connecting...')
+
     // Check if SSE is supported
     const useSSE = typeof EventSource !== 'undefined'
     
@@ -208,7 +238,9 @@ export default function Chat() {
         
         eventSource.addEventListener('progress', (event) => {
           const data = JSON.parse(event.data)
-          setProgressMessage(data.message || 'Processing...')
+          const msg = data.message || 'Processing...'
+          updatePendingStatus(msg)
+          setProgressMessage(msg)
           if (data.percentage !== undefined) {
             setProgressPercentage(data.percentage)
           }
@@ -218,6 +250,7 @@ export default function Chat() {
           const data = JSON.parse(event.data)
           const meta = groupMetaFor(data.questions)
           const msgs: Message[] = []
+          clearPendingStatus()
           if (meta.label && lastGroupRef.current !== meta.label) {
             msgs.push({ id: (Date.now() + 0).toString(), type: 'divider', label: meta.label })
             lastGroupRef.current = meta.label
@@ -242,6 +275,7 @@ export default function Chat() {
         
         eventSource.addEventListener('complete', (event) => {
           const data = JSON.parse(event.data)
+          clearPendingStatus()
           const botMessage: Message = {
             id: (Date.now() + 1).toString(),
             type: 'bot',
@@ -257,6 +291,7 @@ export default function Chat() {
           console.error('SSE Error:', event)
           if (event.data) {
             const data = JSON.parse(event.data)
+            clearPendingStatus()
             setMessages(prev => [...prev, {
               id: (Date.now() + 1).toString(),
               type: 'bot',
@@ -304,6 +339,7 @@ export default function Chat() {
         setSystemMode(data.mode)
       }
 
+      clearPendingStatus()
       const meta = data.needs_clarification ? groupMetaFor(data.questions) : null
       const msgs: Message[] = []
       if (meta && meta.label && lastGroupRef.current !== meta.label) {
@@ -361,6 +397,7 @@ export default function Chat() {
         setSystemMode(data.mode)
       }
 
+      clearPendingStatus()
       const meta = data.needs_clarification ? groupMetaFor(data.questions) : null
       const msgs: Message[] = []
       if (meta && meta.label && lastGroupRef.current !== meta.label) {
@@ -388,9 +425,10 @@ export default function Chat() {
       console.error('Error:', error)
     }
     
+    clearPendingStatus()
     setLoading(false)
   }
-  
+
   return (
     <div className="min-h-screen bg-white">
       <StatusBadge mode={systemMode} />
@@ -544,6 +582,31 @@ export default function Chat() {
                 OnPrem
               </button>
             </div>
+            {loading && (
+              <div
+                data-testid="composer-feedback"
+                role="status"
+                aria-live="polite"
+                className="flex w-full sm:w-[640px] flex-col gap-2 rounded-xl border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700"
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <span>{composerStatusText}</span>
+                  <div className="flex items-center gap-1">
+                    <span className="w-2 h-2 rounded-full bg-gray-400 animate-bounce"></span>
+                    <span className="w-2 h-2 rounded-full bg-gray-400 animate-bounce" style={{ animationDelay: '0.1s' }}></span>
+                    <span className="w-2 h-2 rounded-full bg-gray-400 animate-bounce" style={{ animationDelay: '0.2s' }}></span>
+                  </div>
+                </div>
+                {progressPercentage > 0 && (
+                  <div className="w-full bg-gray-200 rounded-full h-1.5">
+                    <div
+                      className="bg-gray-500 h-1.5 rounded-full transition-all duration-500"
+                      style={{ width: `${progressPercentage}%` }}
+                    ></div>
+                  </div>
+                )}
+              </div>
+            )}
             <div className="flex items-center gap-2 w-full sm:w-[640px]">
               <input
                 type="text"
