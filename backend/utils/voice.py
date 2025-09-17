@@ -6,6 +6,7 @@ from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Union
 
 from elevenlabs.client import AsyncElevenLabs
 from elevenlabs.core import File as ElevenLabsFile
+from elevenlabs.core.api_error import ApiError
 import websockets
 from websockets.exceptions import ConnectionClosed, WebSocketException
 
@@ -57,8 +58,17 @@ class ElevenLabsVoiceClient:
 
     def _sdk_client(self) -> AsyncElevenLabs:
         if self._sdk is None:
-            self._sdk = AsyncElevenLabs(api_key=self.settings.api_key, base_url=self.settings.endpoint.rstrip("/"))
+            self._sdk = AsyncElevenLabs(
+                api_key=self.settings.api_key,
+                base_url=self._sdk_base_url(),
+            )
         return self._sdk
+
+    def _sdk_base_url(self) -> str:
+        base = self.settings.endpoint.rstrip("/")
+        if base.endswith("/v1"):
+            base = base[: -len("/v1")]
+        return base
 
     def _auth_headers(self) -> Dict[str, str]:
         return {"xi-api-key": self.settings.api_key}
@@ -152,11 +162,16 @@ class ElevenLabsVoiceClient:
         sdk = self._sdk_client()
 
         file_payload: ElevenLabsFile = ("stream.wav", audio, "application/octet-stream")
-        response = await sdk.speech_to_text.convert(
-            model_id=self.settings.stt_model,
-            file=file_payload,
-            file_format="other" if audio_format != "pcm_s16le_16" else "pcm_s16le_16",
-        )
+        try:
+            response = await sdk.speech_to_text.convert(
+                model_id=self.settings.stt_model,
+                file=file_payload,
+                file_format="other" if audio_format != "pcm_s16le_16" else "pcm_s16le_16",
+            )
+        except ApiError as exc:
+            raise RuntimeError(
+                f"ElevenLabs speech-to-text request failed with status {exc.status_code}"
+            ) from exc
 
         segments = self._normalize_rest_response(response)
 

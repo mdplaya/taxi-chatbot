@@ -114,11 +114,14 @@ class FakeAsyncSpeechToText:
 
 
 class FakeAsyncElevenLabs:
+    instances: List["FakeAsyncElevenLabs"] = []
+
     def __init__(self, *, api_key: str, base_url: Optional[str] = None):
         self.api_key = api_key
         self.base_url = base_url
         self.speech_to_text = FakeAsyncSpeechToText()
         self.text_to_speech = FakeAsyncTextToSpeech(payload_bytes=b"sdk-bytes")
+        FakeAsyncElevenLabs.instances.append(self)
 
 
 def test_voice_session_requires_config():
@@ -321,3 +324,40 @@ def test_transcribe_stream_falls_back_to_rest(monkeypatch):
         ]
 
     asyncio.run(run())
+
+
+def test_rest_fallback_trims_v1_suffix(monkeypatch):
+    settings = VoiceSettings(
+        api_key="test-key",
+        stt_model="stt-model",
+        tts_model="tts-model",
+        voice_id="test-voice",
+        endpoint="https://api.elevenlabs.io/v1",
+    )
+
+    class BrokenWebSocket:
+        async def __aenter__(self):
+            raise ConnectionError("ws down")
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_connect(*args, **kwargs):
+        return BrokenWebSocket()
+
+    monkeypatch.setattr("backend.utils.voice._connect_websocket", fake_connect)
+    monkeypatch.setattr("utils.voice._connect_websocket", fake_connect)
+    FakeAsyncElevenLabs.instances.clear()
+    monkeypatch.setattr("backend.utils.voice.AsyncElevenLabs", FakeAsyncElevenLabs)
+    monkeypatch.setattr("utils.voice.AsyncElevenLabs", FakeAsyncElevenLabs)
+
+    async def run() -> None:
+        client = ElevenLabsVoiceClient(settings)
+        async with client.transcribe_stream(audio=b"abc", audio_format="pcm16", session_id="sess-1") as stream:
+            await stream.__anext__()
+
+    asyncio.run(run())
+
+    assert FakeAsyncElevenLabs.instances
+    base_urls = {instance.base_url for instance in FakeAsyncElevenLabs.instances}
+    assert base_urls == {"https://api.elevenlabs.io"}
